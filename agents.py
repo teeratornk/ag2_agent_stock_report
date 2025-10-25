@@ -8,22 +8,23 @@ class CustomAdminAgent(autogen.ConversableAgent):
         """Override to provide better prompt message."""
         # Custom prompt that's clearer for the user
         custom_prompt = (
-            "\n" + "="*60 + "\n"
-            "🎩 ADMIN INPUT REQUIRED\n"
-            "="*60 + "\n"
-            "Current Options:\n"
-            "  📝 Provide specific feedback (e.g., 'add more detail about price trends')\n"
-            "  ✅ Type 'approved' when satisfied with the results\n"
-            "  🛑 Type 'terminate' to end the conversation\n"
-            "  ⏩ Press Enter to let agents continue working\n"
-            "\nExamples of good feedback:\n"
-            "  • 'Include comparison with S&P 500'\n"
-            "  • 'Add more technical analysis indicators'\n"
-            "  • 'Make the introduction more engaging'\n"
-            "  • 'Show 3-month data instead of 1-month'\n"
+            "\n[Admin Input Required]\n"
+            "Options:\n"
+            "  - Provide feedback or instructions for the team\n"
+            "  - Type 'approved' when satisfied with the results\n"
+            "  - Type 'terminate' to end the conversation\n"
+            "  - Type 'quit_debug' to exit with debug information\n"
+            "  - Press Enter to let agents continue\n"
             "\nYour input: "
         )
-        return input(custom_prompt)
+        user_input = input(custom_prompt)
+        
+        # Check for debug quit
+        if user_input.lower() == 'quit_debug':
+            # Raise an exception with the debug quit message
+            raise Exception("quit_debug requested by user")
+        
+        return user_input
 
 def create_agents(config, llm_config: Dict[str, Any], exit_terms: set = None) -> Dict[str, autogen.ConversableAgent]:
     """Create all agents for the group chat.
@@ -44,46 +45,10 @@ def create_agents(config, llm_config: Dict[str, Any], exit_terms: set = None) ->
     agents["user_proxy"] = CustomAdminAgent(
         name="Admin",
         system_message=(
-            "You are the Admin - the human supervisor overseeing this AI team.\n\n"
-            
-            "YOUR ROLE:\n"
-            "1. Provide the initial task to the team\n"
-            "2. Review the team's work at key checkpoints\n"
-            "3. Give specific, actionable feedback\n"
-            "4. Approve final deliverables\n\n"
-            
-            "HOW TO INTERPRET USER INPUT:\n"
-            "• Empty input (just Enter) = Continue working, no changes needed\n"
-            "• Specific instructions = Pass these to the team for implementation\n"
-            "• 'approved' = Work is satisfactory, finalize the output\n"
-            "• 'terminate' = Stop all work immediately\n\n"
-            
-            "WHEN YOU RECEIVE FEEDBACK, FORWARD IT CLEARLY:\n"
-            "If user says: 'add more charts'\n"
-            "You say: 'The user requests additional charts. Please add more visualizations to support the analysis.'\n\n"
-            
-            "If user says: 'make it more detailed'\n"
-            "You say: 'The user wants more detailed analysis. Please expand the sections with additional data points and explanations.'\n\n"
-            
-            "If user says: 'include competitor analysis'\n"
-            "You say: 'The user requests competitor analysis. Please add a section comparing with major competitors in the same sector.'\n\n"
-            
-            "IMPORTANT BEHAVIORS:\n"
-            "• Always acknowledge user feedback before passing it on\n"
-            "• Translate vague requests into specific actionable items\n"
-            "• When user presses Enter (empty input), say 'Continuing with current approach.'\n"
-            "• When user types 'approved', say 'Work approved. Finalizing output.'\n"
-            "• When user types 'terminate', say 'Terminating conversation as requested.'\n\n"
-            
-            "INTERACTION FLOW:\n"
-            "1. Present task clearly to Planner\n"
-            "2. Wait for team to work\n"
-            "3. When prompted for input, consider user's response:\n"
-            "   - Empty = Let team continue\n"
-            "   - Feedback = Interpret and relay to team\n"
-            "   - Approved = Signal completion\n"
-            "   - Terminate = Stop immediately\n"
-            "4. Always be clear and professional in communications"
+            "You are the Admin. Give the task, and send instructions to writer to refine the blog post. "
+            "Review reports and provide feedback for improvements. "
+            "When satisfied with the report, respond with 'APPROVED' to finalize. "
+            "You can type 'terminate' at any time to terminate the conversation."
         ),
         code_execution_config=False,
         llm_config=llm_config,
@@ -91,106 +56,43 @@ def create_agents(config, llm_config: Dict[str, Any], exit_terms: set = None) ->
         is_termination_msg=list(exit_terms),  # Convert set to list for autogen
         max_consecutive_auto_reply=0,  # Ensure human input is always required
         default_auto_reply="",  # No auto-reply
-        description=(
-            "Admin (Human Supervisor). Provides tasks, reviews work, gives feedback. "
-            "Understands and interprets human input to guide the AI team effectively."
-        )
+        description="Admin who provides tasks, reviews outputs, and gives feedback. Type 'exit' to end."
     )
     
-    # Planner agent - STRENGTHENED VERSION
+    # Planner agent
     agents["planner"] = autogen.ConversableAgent(
         name="Planner",
         system_message=(
-            "You are the Planner - the strategic coordinator of this team. You MUST provide clear, actionable instructions.\n\n"
-            
-            "CRITICAL RULES:\n"
-            "1. NEVER output just numbers, scores, or cryptic responses\n"
-            "2. ALWAYS provide full sentences with clear instructions\n"
-            "3. ALWAYS specify WHO should do WHAT and WHY\n"
-            "4. NEVER try to execute code or fetch data yourself\n"
-            "5. ALWAYS listen to Admin's feedback and incorporate it immediately\n\n"
-            
-            "YOUR WORKFLOW:\n"
-            "Step 1 - Analyze the Task:\n"
-            "   • Understand what the user wants\n"
-            "   • Identify required data, analysis, and output format\n"
-            "   • Break down into actionable steps\n\n"
-            
-            "Step 2 - Delegate to Engineer for Data:\n"
-            "   • ALWAYS start by instructing Engineer to fetch required data\n"
-            "   • Be specific: 'Engineer, please fetch [TICKER] stock data for [TIME PERIOD]'\n"
-            "   • Request specific visualizations: 'Create a line chart showing price trends'\n"
-            "   • Example instruction:\n"
-            "     'Engineer, please write Python code to:\n"
-            "      1. Fetch NVDA stock data for the past month using yfinance\n"
-            "      2. Calculate daily returns and volatility\n"
-            "      3. Create a price chart with volume overlay\n"
-            "      4. Save data to data/nvda_analysis.csv and chart to figures/nvda_chart.png'\n\n"
-            
-            "Step 3 - Review Execution Results:\n"
-            "   • After Executor runs the code, review the output\n"
-            "   • Check for errors or missing data\n"
-            "   • If issues found, provide specific fixes to Engineer:\n"
-            "     'Engineer, the code failed because [REASON]. Please fix by [SOLUTION]'\n"
-            "   • If successful, note what data and files were created\n\n"
-            
-            "Step 4 - Delegate to Writer for Content:\n"
-            "   • Once data is ready, instruct Writer to create the blog post\n"
-            "   • Be specific about content requirements:\n"
-            "     'Writer, create a blog post about NVDA stock performance including:\n"
-            "      - Introduction explaining the analysis period\n"
-            "      - Key findings from the data (reference specific metrics)\n"
-            "      - Include the chart at figures/nvda_chart.png\n"
-            "      - SEO optimize for keywords: NVIDIA stock, NVDA analysis'\n\n"
-            
-            "Step 5 - Process Admin Feedback:\n"
-            "   • When Admin provides feedback, IMMEDIATELY acknowledge it\n"
-            "   • Translate feedback into specific actions for the team\n"
-            "   • Examples:\n"
-            "     Admin: 'add more charts' → Tell Engineer to create additional visualizations\n"
-            "     Admin: 'more detail' → Tell Writer to expand analysis sections\n"
-            "     Admin: 'include competitor analysis' → Tell Engineer and Writer to add comparison section\n"
-            "     Admin: 'Continuing' → Proceed with current plan\n"
-            "     Admin: 'approved' → Mark as 'REVIEW_COMPLETE'\n\n"
-            
-            "Step 6 - Review and Iterate:\n"
-            "   • Review Writer's draft for accuracy and completeness\n"
-            "   • If improvements needed, provide specific feedback:\n"
-            "     'Writer, please revise the blog post to:\n"
-            "      - Add more detail about the 15% price increase\n"
-            "      - Include a section on trading volume trends\n"
-            "      - Improve the conclusion with forward-looking insights'\n"
-            "   • When satisfied, respond with: 'REVIEW_COMPLETE - The report meets all requirements.'\n\n"
-            
-            "HANDLING ADMIN FEEDBACK:\n"
-            "• If Admin says 'add [something]': Instruct appropriate agent to add it\n"
-            "• If Admin says 'change [something]': Instruct appropriate agent to modify it\n"
-            "• If Admin says 'more [something]': Instruct appropriate agent to expand it\n"
-            "• If Admin says 'approved': Respond with 'REVIEW_COMPLETE'\n"
-            "• If Admin presses Enter/continues: Proceed with your plan\n\n"
-            
-            "COMMON ISSUES TO CHECK:\n"
-            "• Interactive commands: If you see plt.show() or input(), tell Engineer to remove them\n"
-            "• Missing data: Ensure all requested metrics are calculated\n"
-            "• Chart quality: Verify charts have titles, labels, and legends\n"
-            "• Report completeness: Check that all data findings are incorporated\n\n"
-            
-            "RESPONSE FORMAT:\n"
-            "Always structure your responses as:\n"
-            "1. Current Status: [What just happened]\n"
-            "2. Next Action: [Who should do what]\n"
-            "3. Specific Instructions: [Detailed requirements]\n\n"
-            
-            "Example first response:\n"
-            "'Current Status: Received task to analyze NVIDIA stock.\n"
-            "Next Action: Engineer needs to fetch stock data.\n"
-            "Specific Instructions: Engineer, please write Python code to fetch NVIDIA (NVDA) "
-            "stock data for the past month using yfinance, create price and volume charts, "
-            "and calculate key metrics like returns and volatility.'"
+            "You are the Planner. Your responsibilities:\n"
+            "1. Determine what information is needed to complete the task\n"
+            "2. IMPORTANT: Always delegate to Engineer when you need:\n"
+            "   - Stock data from Yahoo Finance or any other API\n"
+            "   - Historical price data, volume, or market metrics\n"
+            "   - Charts, figures, or visualizations\n"
+            "   - Data analysis or calculations\n"
+            "   - Any information that requires code execution\n"
+            "3. Provide clear, specific requirements to Engineer including:\n"
+            "   - What data to fetch (ticker symbols, date ranges, metrics)\n"
+            "   - What visualizations to create (chart types, labels, colors)\n"
+            "   - What analysis to perform (calculations, comparisons, trends)\n"
+            "4. After Engineer completes coding and Executor runs it:\n"
+            "   - Review the results and data quality\n"
+            "   - Verify factual accuracy\n"
+            "   - Request additional data or figures if needed\n"
+            "   - IMPORTANT: Check for any interactive commands (plt.show(), input(), etc.) and request Engineer to remove them\n"
+            "5. Once data is collected, instruct Writer to create the report\n"
+            "6. Review Writer's content for:\n"
+            "   - SEO optimization and web discoverability\n"
+            "   - Factual accuracy against collected data\n"
+            "   - Completeness and clarity\n"
+            "7. If code fails, provide specific feedback to Engineer for fixes\n"
+            "8. When satisfied with both code and report, respond with 'REVIEW_COMPLETE'\n\n"
+            "WORKFLOW: Task → Call Engineer for data/figures → Review results → "
+            "Call Writer for report → Review report → Iterate or complete"
         ),
         description=(
-            "Planner. Strategic coordinator who analyzes tasks, delegates data fetching to Engineer, "
-            "reviews results, delegates writing to Writer, processes Admin feedback, and ensures quality."
+            "Planner. Determines information needed, MUST delegate to Engineer for all data fetching "
+            "and visualization tasks, reviews progress, provides feedback on code and writing quality."
         ),
         llm_config=llm_config,
         human_input_mode="NEVER",

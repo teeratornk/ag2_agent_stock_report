@@ -2,7 +2,8 @@ import autogen
 from typing import Dict, List, Any, Optional
 import json, os, hashlib, time
 from datetime import datetime
-from iteration_manager import IterationManager  # Add this import
+from iteration_manager import IterationManager
+from artifact_manager import ArtifactManager  # Add new import
 
 class CustomGroupChatManagerWithTracking(autogen.GroupChatManager):
     """Custom GroupChatManager that tracks and saves artifacts as messages are processed."""
@@ -24,123 +25,77 @@ class CustomGroupChatManagerWithTracking(autogen.GroupChatManager):
             self.message_count += 1
             # Update inner turn count in custom_manager
             if self.custom_manager:
-                self.custom_manager.current_inner_turn = max(1, (self.message_count + 3) // 4)  # Roughly 1 turn per 4 messages
+                self.custom_manager.current_inner_turn = max(1, (self.message_count + 3) // 4)
+                # CRITICAL FIX: Always update artifact manager's iteration with current values
+                self.custom_manager.artifact_manager.set_iteration(
+                    self.custom_manager.current_outer_turn,
+                    self.custom_manager.current_inner_turn
+                )
         
         # Extract message content and sender name
         content = message.get("content", "") if isinstance(message, dict) else str(message)
         sender_name = sender.name if hasattr(sender, 'name') else str(sender)
         
-        print(f"  📨 Processing message from {sender_name} (length: {len(content)})")  # Debug
+        print(f"  📨 Processing message from {sender_name} (length: {len(content)})")
         
         # Save artifacts based on sender
         if self.custom_manager:
             try:
                 # Save code when Engineer produces it
                 if sender_name == "Engineer" and "```python" in content:
-                    print(f"    🔧 Engineer code detected")  # Debug
+                    print(f"    🔧 Engineer code detected")
                     code_blocks = self.custom_manager._extract_python_blocks(content)
                     for code in code_blocks:
                         if code.strip():
-                            # Determine success by checking if there's an Executor message coming
-                            success = False  # Will be updated later by Executor
-                            filepath = self.custom_manager.save_code_iteration(code, success)
+                            # Save with initial status (will be updated by Executor)
+                            filepath = self.custom_manager.artifact_manager.save_code_iteration(code, success=False)
                             print(f"    ✅ Saved code to {filepath}")
                 
                 # Save draft when Writer produces it
                 elif sender_name == "Writer" and ("```md" in content or "```markdown" in content or "#" in content):
-                    print(f"    ✏️ Writer draft detected")  # Debug
-                    # Try to extract markdown blocks first
+                    print(f"    ✏️ Writer draft detected")
                     draft_blocks = self.custom_manager._extract_md_blocks(content)
                     
-                    # If no blocks found but content looks like markdown, use the whole content
                     if not draft_blocks and "#" in content and len(content) > 150:
                         draft_blocks = [content]
                     
                     for draft in draft_blocks:
                         if draft.strip():
-                            filepath = self.custom_manager.save_draft_iteration(draft)
+                            filepath = self.custom_manager.artifact_manager.save_draft_iteration(draft)
                             print(f"    ✅ Saved draft to {filepath}")
                 
                 # Update code execution status when Executor reports
                 elif sender_name == "Executor":
-                    print(f"    ⚙️ Executor results detected")  # Debug
-                    # Check if execution was successful
+                    print(f"    ⚙️ Executor results detected")
                     success = not any(err in content.lower() for err in ["error", "exception", "traceback", "failed"])
-                    
-                    # Update the last code entry's success status
-                    if self.custom_manager.code_lineage:
-                        self.custom_manager.code_lineage[-1]["success"] = success
-                        # Rewrite the file header with updated status
-                        self.custom_manager._rewrite_code_header(self.custom_manager.code_lineage[-1])
-                        print(f"    ✅ Updated code status: {'SUCCESS' if success else 'FAILED'}")
+                    self.custom_manager.artifact_manager.update_code_execution_status(success)
                 
-                # Capture feedback from Planner - SAVE IT TO FILE
+                # Capture feedback from Planner
                 elif sender_name == "Planner":
-                    print(f"    📋 Planner feedback detected")  # Debug
+                    print(f"    📋 Planner feedback detected")
                     self.planner_message_count += 1
                     
-                    # Save Planner message to a file in coding directory
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    planner_filename = f"planner_msg_{self.custom_manager.current_outer_turn}_{self.planner_message_count}_{timestamp}.txt"
-                    planner_filepath = os.path.join(self.custom_manager.config.coding_dir, planner_filename)
-                    
-                    # Save the planner message with context
-                    with open(planner_filepath, "w", encoding="utf-8") as f:
-                        f.write(f"=== PLANNER MESSAGE ===\n")
-                        f.write(f"Outer Iteration: {self.custom_manager.current_outer_turn}\n")
-                        f.write(f"Message Number: {self.planner_message_count}\n")
-                        f.write(f"Timestamp: {timestamp}\n")
-                        f.write(f"{'='*50}\n\n")
-                        f.write(content)
-                        f.write(f"\n\n{'='*50}\n")
-                        f.write("END OF MESSAGE\n")
-                    
-                    print(f"    ✅ Saved Planner feedback to {planner_filename}")
+                    # Save Planner message
+                    self.custom_manager.artifact_manager.save_planner_message(content, self.planner_message_count)
                     
                     # Check if this is feedback for code or draft
-                    # Look at recent messages to determine context
                     if len(self.groupchat.messages) > 1:
                         prev_msg = self.groupchat.messages[-2] if len(self.groupchat.messages) > 1 else None
                         if prev_msg:
                             prev_sender = prev_msg.get("name", "")
-                            if prev_sender == "Executor" and self.custom_manager.code_lineage:
-                                # This is feedback for code
-                                self.custom_manager.code_lineage[-1]["feedback"] = content
-                                self.custom_manager._rewrite_code_header(self.custom_manager.code_lineage[-1])
-                                print(f"    ✅ Added feedback to code")
-                            elif prev_sender == "Writer" and self.custom_manager.draft_lineage:
-                                # This is feedback for draft
-                                self.custom_manager.draft_lineage[-1]["feedback"] = content
-                                self.custom_manager._rewrite_draft_header(self.custom_manager.draft_lineage[-1])
-                                print(f"    ✅ Added feedback to draft")
+                            if prev_sender == "Executor":
+                                self.custom_manager.artifact_manager.add_feedback_to_code(content)
+                            elif prev_sender == "Writer":
+                                self.custom_manager.artifact_manager.add_feedback_to_draft(content)
                 
                 # Capture summary from Summarizer
                 elif sender_name == "Summarizer":
-                    print(f"    📊 Summarizer output detected")  # Debug
-                    
-                    # Save Summarizer output to a file immediately
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    summary_filename = f"summarizer_output_{self.custom_manager.current_outer_turn}_{timestamp}.txt"
-                    summary_filepath = os.path.join(self.custom_manager.config.artifact_dir, summary_filename)
-                    
-                    # Save the summarizer message with context
-                    with open(summary_filepath, "w", encoding="utf-8") as f:
-                        f.write(f"=== SUMMARIZER OUTPUT ===\n")
-                        f.write(f"Outer Iteration: {self.custom_manager.current_outer_turn}\n")
-                        f.write(f"Inner Turn: {self.custom_manager.current_inner_turn}\n")
-                        f.write(f"Timestamp: {timestamp}\n")
-                        f.write(f"{'='*50}\n\n")
-                        f.write(content)
-                        f.write(f"\n\n{'='*50}\n")
-                        f.write("END OF SUMMARY\n")
-                    
-                    print(f"    ✅ Saved Summarizer output to {summary_filename}")
-                    
-                    # Store reference for later use in summarize_iteration
+                    print(f"    📊 Summarizer output detected")
+                    self.custom_manager.artifact_manager.save_summarizer_output(content)
                     self.custom_manager.last_summarizer_output = content
             
             except Exception as e:
-                print(f"    ❌ Error saving artifact: {e}")  # Debug
+                print(f"    ❌ Error saving artifact: {e}")
         
         return result
 
@@ -161,14 +116,11 @@ class CustomGroupChatManager:
         self.current_outer_turn = 0
         self.current_inner_turn = 0
         
-        # Initialize iteration manager
+        # Initialize managers
         self.iteration_manager = IterationManager(config, memory_manager)
+        self.artifact_manager = ArtifactManager(config, memory_manager)
         
-        # Track lineage
-        self.code_lineage = []  # List of (code, success, feedback) tuples
-        self.draft_lineage = []  # List of (draft, feedback) tuples
-        
-        # Track explicit user termination - SINGLE SOURCE OF TRUTH for exit terms
+        # Track explicit user termination
         self.conversation_terminated = False
         if exit_terms:
             self._exit_terms = exit_terms
@@ -190,7 +142,7 @@ class CustomGroupChatManager:
         
         # Track last summarizer output
         self.last_summarizer_output = None
-        
+    
     def setup_group_chat(self):
         """Configure group chat with allowed speaker transitions."""
         # Define speaker transitions
@@ -239,170 +191,36 @@ class CustomGroupChatManager:
             custom_manager=self  # Pass reference to self for artifact saving
         )
     
+    # Delegate artifact methods to ArtifactManager
+    @property
+    def code_lineage(self):
+        """Get code lineage from artifact manager."""
+        return self.artifact_manager.get_code_lineage()
+    
+    @property
+    def draft_lineage(self):
+        """Get draft lineage from artifact manager."""
+        return self.artifact_manager.get_draft_lineage()
+    
     def save_code_iteration(self, code: str, success: bool, feedback: str = "") -> str:
-        """Save code iteration with execution status and feedback."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"code_v{self.current_outer_turn}_{self.current_inner_turn}_{timestamp}.py"
-        filepath = os.path.join(self.config.coding_dir, filename)
-        
-        # Create header with metadata
-        header = f'''"""
-Iteration: Outer {self.current_outer_turn}, Inner {self.current_inner_turn}
-Timestamp: {timestamp}
-Execution Status: {'SUCCESS' if success else 'FAILED'}
-Feedback from Planner:
-{feedback if feedback else 'No feedback yet'}
-"""
-
-'''
-        
-        # Save code with metadata
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(header)
-            f.write(code)
-        
-        # Track in lineage
-        self.code_lineage.append({
-            "iteration": f"{self.current_outer_turn}_{self.current_inner_turn}",
-            "file": filepath,
-            "success": success,
-            "feedback": feedback,
-            "timestamp": timestamp
-        })
-        
-        print(f"  📝 Saved code iteration to {filename} (Status: {'✓' if success else '✗'})")
-        return filepath
+        """Delegate to artifact manager."""
+        return self.artifact_manager.save_code_iteration(code, success, feedback)
     
     def save_draft_iteration(self, draft: str, feedback: str = "") -> str:
-        """Save draft iteration with feedback."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"report_v{self.current_outer_turn}_{self.current_inner_turn}_{timestamp}.md"
-        filepath = os.path.join(self.config.draft_dir, filename)
-        
-        # Create header with metadata
-        header = f'''---
-iteration: Outer {self.current_outer_turn}, Inner {self.current_inner_turn}
-timestamp: {timestamp}
-feedback: |
-  {feedback if feedback else 'No feedback yet'}
----
-
-'''
-        
-        # Save draft with metadata
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(header)
-            f.write(draft)
-        
-        # Track in lineage
-        self.draft_lineage.append({
-            "iteration": f"{self.current_outer_turn}_{self.current_inner_turn}",
-            "file": filepath,
-            "feedback": feedback,
-            "timestamp": timestamp
-        })
-        
-        print(f"  📄 Saved draft iteration to {filename}")
-        return filepath
+        """Delegate to artifact manager."""
+        return self.artifact_manager.save_draft_iteration(draft, feedback)
     
     def get_latest_code_with_feedback(self) -> str:
-        """Get the latest code with planner's feedback for engineer to iterate."""
-        if not self.code_lineage:
-            return ""
-        
-        latest = self.code_lineage[-1]
-        with open(latest["file"], "r", encoding="utf-8") as f:
-            code = f.read()
-        
-        # Format for engineer with clear feedback
-        formatted = f'''# Previous Code Iteration
-# Status: {'SUCCESS' if latest["success"] else 'FAILED'}
-# Planner's Feedback:
-# {latest["feedback"]}
-# 
-# Please address the feedback above in your next iteration.
-# Original code below:
-# {'='*60}
-
-{code}
-'''
-        return formatted
+        """Delegate to artifact manager."""
+        return self.artifact_manager.get_latest_code_with_feedback()
     
     def get_latest_draft_with_feedback(self) -> str:
-        """Get the latest draft with planner's feedback for writer to iterate."""
-        if not self.draft_lineage:
-            return ""
-        
-        latest = self.draft_lineage[-1]
-        with open(latest["file"], "r", encoding="utf-8") as f:
-            draft = f.read()
-        
-        # Format for writer with clear feedback
-        formatted = f'''<!-- Previous Draft Iteration -->
-<!-- Planner's Feedback:
-{latest["feedback"]}
-
-Please address the feedback above in your next iteration.
-Original draft below:
-{'='*60}
--->
-
-{draft}
-'''
-        return formatted
+        """Delegate to artifact manager."""
+        return self.artifact_manager.get_latest_draft_with_feedback()
     
-    def save_iteration_summary_to_artifact(self, summary: Dict[str, Any]):
-        """Save iteration summary to artifact folder for persistence."""
-        # Ensure artifact directory exists (config.artifact_dir is now a full path)
-        if not os.path.exists(self.config.artifact_dir):
-            os.makedirs(self.config.artifact_dir, exist_ok=True)
-            print(f"  📁 Created artifact directory: {self.config.artifact_dir}")
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"summary_outer{self.current_outer_turn}_{timestamp}.json"
-        filepath = os.path.join(self.config.artifact_dir, filename)
-        
-        print(f"  💾 Saving artifact: {filename}")  # More concise debug
-        
-        # Prepare the complete summary with all lineage information
-        complete_summary = {
-            "outer_iteration": self.current_outer_turn,
-            "total_inner_iterations": self.current_inner_turn,
-            "timestamp": timestamp,
-            "summary_text": summary.get("summary_text", ""),
-            "metrics": summary.get("metrics", {}),
-            "code_lineage": summary.get("code_lineage", self.code_lineage[-5:] if self.code_lineage else []),
-            "draft_lineage": summary.get("draft_lineage", self.draft_lineage[-5:] if self.draft_lineage else []),
-            "artifacts": summary.get("artifacts", {}),
-            "task_history": getattr(self, "task_history", [])
-        }
-        
-        # Write to file with error handling
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(complete_summary, f, indent=2, ensure_ascii=False)
-            print(f"  ✅ Successfully saved iteration summary to {filename}")
-            
-            # Verify it's readable
-            with open(filepath, "r", encoding="utf-8") as f:
-                test_load = json.load(f)
-                print(f"  ✅ Verified: Artifact is readable (contains {len(test_load)} keys)")
-            
-        except Exception as e:
-            print(f"  ❌ ERROR saving artifact: {e}")
-            import traceback
-            traceback.print_exc()
-            return filepath  # Return path even if there was an error
-        
-        # Also save to memory manager with the filepath
-        if hasattr(self, 'memory_manager') and self.memory_manager:
-            try:
-                self.memory_manager.save_artifact_reference(self.current_outer_turn, filepath)
-                print(f"  📝 Registered artifact with memory manager for iteration {self.current_outer_turn}")
-            except Exception as e:
-                print(f"  ⚠️ Warning: Could not register with memory manager: {e}")
-        
-        return filepath
+    def save_iteration_summary_to_artifact(self, summary: Dict[str, Any]) -> str:
+        """Delegate to artifact manager."""
+        return self.artifact_manager.save_iteration_summary_to_artifact(summary)
     
     def load_previous_iteration_context(self) -> Dict[str, Any]:
         """Load context from previous iteration's artifact."""
@@ -660,226 +478,104 @@ Original draft below:
         """Attach first Planner feedback after latest unsatisfied code/draft entries."""
         if not self.groupchat.messages:
             return
-        # Map last code/draft timestamp -> waiting for feedback
+        
+        # Get last planner message
         last_planner_msg = None
         for msg in reversed(self.groupchat.messages):
             if msg.get("name") == "Planner":
                 last_planner_msg = msg.get("content", "").strip()
                 break
+        
         if not last_planner_msg:
             return
-        # If latest code entry has empty feedback -> fill
-        if self.code_lineage and not self.code_lineage[-1]["feedback"]:
-            self.code_lineage[-1]["feedback"] = last_planner_msg
-            self._rewrite_code_header(self.code_lineage[-1])
-        if self.draft_lineage and not self.draft_lineage[-1]["feedback"]:
-            self.draft_lineage[-1]["feedback"] = last_planner_msg
-            self._rewrite_draft_header(self.draft_lineage[-1])
-
-    def _rewrite_code_header(self, entry: Dict[str, Any]):
-        """Rewrite the header of a saved code file with updated feedback and status."""
-        path = entry["file"]
-        if not os.path.exists(path): 
-            return
-            
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
         
-        # Find the end of the header docstring
-        start_quotes = content.find('"""')
-        if start_quotes == -1:
-            return
-            
-        end_quotes = content.find('"""', start_quotes + 3)
-        if end_quotes == -1:
-            return
+        # Add feedback to latest entries if they don't have it
+        latest_code = self.artifact_manager.get_latest_code_entry()
+        if latest_code and not latest_code.get("feedback"):
+            self.artifact_manager.add_feedback_to_code(last_planner_msg)
         
-        # Get the code part after the header
-        code_part = content[end_quotes + 3:].lstrip('\n')
+        latest_draft = self.artifact_manager.get_latest_draft_entry()
+        if latest_draft and not latest_draft.get("feedback"):
+            self.artifact_manager.add_feedback_to_draft(last_planner_msg)
+    
+    def _count_existing_outer_iterations(self) -> int:
+        """Count how many outer iterations have been completed previously."""
+        max_iteration = 0
         
-        # Create new header with updated status
-        execution_status = "PENDING"
-        if entry.get("success") is True:
-            execution_status = "SUCCESS"
-        elif entry.get("success") is False:
-            execution_status = "FAILED"
-            
-        header = f'''"""
-Iteration: Outer {self.current_outer_turn}, Inner {self.current_inner_turn}
-Timestamp: {entry.get("timestamp", "unknown")}
-Execution Status: {execution_status}
-Feedback from Planner:
-{entry.get("feedback") or "No feedback yet"}
-"""
-
-'''
+        print("\n🔍 DEBUG: Counting existing outer iterations...")
         
-        # Write updated file
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(header)
-            f.write(code_part)
-
-    def _rewrite_draft_header(self, entry: Dict[str, Any]):
-        """Rewrite the header of a saved draft file with updated feedback."""
-        path = entry["file"]
-        if not os.path.exists(path): return
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-        body = content
-        if content.startswith("---"):
-            second = content.find("---", 3)
-            if second != -1:
-                body = content[second+3:].lstrip()
-        header = f'''---
-iteration: Outer {self.current_outer_turn}, Inner {self.current_inner_turn}
-timestamp: {entry["timestamp"]}
-feedback: |
-  {entry["feedback"] or 'No feedback yet'}
----
-
-'''
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(header + body)
-
-    def _scan_and_save_new_code(self):
-        """Scan for new code blocks in messages and save them."""
-        msgs = self.groupchat.messages
-        print(f"  🔍 Scanning {len(msgs)} messages for code...")  # Debug
+        if os.path.exists(self.config.artifact_dir):
+            print(f"  📁 Artifact directory exists: {self.config.artifact_dir}")
+            all_files = os.listdir(self.config.artifact_dir)
+            print(f"  📄 Total files in artifact directory: {len(all_files)}")
+            
+            # Debug: print all files
+            print(f"  📄 Files found:")
+            for f in sorted(all_files):
+                print(f"      - {f}")
+            
+            # Look for summary files to determine the highest iteration number
+            summary_files = []
+            for filename in all_files:
+                if filename.startswith("summary_outer") and filename.endswith(".json"):
+                    summary_files.append(filename)
+                    # Extract iteration number from filename
+                    # Format: summary_outer{N}_{timestamp}.json
+                    try:
+                        parts = filename.replace("summary_outer", "").replace(".json", "").split("_")
+                        if parts and parts[0].isdigit():
+                            iteration_num = int(parts[0])
+                            print(f"    ✓ Found summary file: {filename} → Iteration {iteration_num}")
+                            max_iteration = max(max_iteration, iteration_num)
+                    except Exception as e:
+                        print(f"    ❌ Error parsing {filename}: {e}")
+                        continue
+            
+            print(f"  📊 Summary files found: {len(summary_files)}")
+            
+            # Also check summarizer output files
+            summarizer_files = []
+            for filename in all_files:
+                if filename.startswith("summarizer_output_") and filename.endswith(".txt"):
+                    summarizer_files.append(filename)
+                    # Format: summarizer_output_{N}_{timestamp}.txt
+                    try:
+                        parts = filename.replace("summarizer_output_", "").replace(".txt", "").split("_")
+                        if parts and parts[0].isdigit():
+                            iteration_num = int(parts[0])
+                            print(f"    ✓ Found summarizer file: {filename} → Iteration {iteration_num}")
+                            max_iteration = max(max_iteration, iteration_num)
+                    except Exception as e:
+                        print(f"    ❌ Error parsing {filename}: {e}")
+                        continue
+            
+            print(f"  📊 Summarizer files found: {len(summarizer_files)}")
+        else:
+            print(f"  ⚠️ Artifact directory does not exist: {self.config.artifact_dir}")
         
-        for idx, msg in enumerate(msgs):
-            if msg.get("name") != "Engineer":
-                continue
-            
-            content = msg.get("content", "") or ""
-            print(f"    - Found Engineer message at index {idx}, length: {len(content)}")  # Debug
-            
-            blocks = self._extract_python_blocks(content)
-            
-            if not blocks:
-                print(f"    - No Python blocks found in Engineer message")  # Debug
-                continue
-            
-            print(f"    - Found {len(blocks)} code blocks to save")  # Debug
-            
-            # Save each new block
-            for block in blocks:
-                h = self._hash(block)
-                if h in self._saved_code_hashes:
-                    print(f"    - Block already saved (hash exists)")  # Debug
-                    continue
-                success = self._determine_execution_status(idx)
-                self._saved_code_hashes.add(h)
-                self._save_code_block(block, success)
-
-    def _save_code_block(self, code: str, success: bool):
-        """Save a new code block as a file and update lineage."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"code_v{self.current_outer_turn}_{self.current_inner_turn}_{timestamp}.py"
-        path = os.path.join(self.config.coding_dir, filename)
-        header = f'''"""
-Iteration: Outer {self.current_outer_turn}, Inner {self.current_inner_turn}
-Timestamp: {timestamp}
-Execution Status: {'SUCCESS' if success else 'FAILED'}
-Feedback from Planner:
-No feedback yet
-"""
-
-'''
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(header + code)
-        self.code_lineage.append({
-            "iteration": f"{self.current_outer_turn}_{self.current_inner_turn}",
-            "file": path,
-            "success": success,
-            "feedback": "",
-            "timestamp": timestamp
-        })
-        print(f"  📝 Code saved: {filename} ({'✓' if success else '✗'})")
-
-    def _scan_and_save_new_drafts(self):
-        """Scan for new draft blocks in messages and save them."""
-        msgs = self.groupchat.messages
-        print(f"  🔍 Scanning {len(msgs)} messages for drafts...")  # Debug
+        print(f"  🎯 Maximum iteration found: {max_iteration}")
+        print(f"  ➡️ Next iteration should be: {max_iteration + 1}")
+        print(f"  📌 Returning: {max_iteration}")
         
-        for idx, msg in enumerate(msgs):
-            if msg.get("name") != "Writer":
-                continue
-            
-            content = msg.get("content", "") or ""
-            print(f"    - Found Writer message at index {idx}, length: {len(content)}")  # Debug
-            
-            # Look for markdown blocks
-            blocks = self._extract_md_blocks(content)
-            
-            # Also check if filename directive is present for direct saving
-            if "# filename: report_draft.md" in content or "filename: report_draft.md" in content:
-                # Extract the content that should be saved
-                if "```md" in content or "```markdown" in content:
-                    # Already in blocks, will be processed
-                    pass
-                else:
-                    # Treat the whole content after filename directive as markdown
-                    lines = content.split('\n')
-                    start_idx = -1
-                    for i, line in enumerate(lines):
-                        if "filename: report_draft.md" in line:
-                            start_idx = i + 1
-                            break
-                    if start_idx > 0:
-                        markdown_content = '\n'.join(lines[start_idx:])
-                        if markdown_content.strip():
-                            blocks.append(markdown_content.strip())
-            
-            if not blocks:
-                # fallback: large markdown-like content
-                if "#" in content and len(content) > 150:
-                    blocks = [content]
-                    print(f"    - Using fallback: found markdown-like content")  # Debug
-            
-            print(f"    - Found {len(blocks)} draft blocks to save")  # Debug
-            
-            for block in blocks:
-                h = self._hash(block)
-                if h in self._saved_draft_hashes:
-                    print(f"    - Block already saved (hash exists)")  # Debug
-                    continue
-                self._saved_draft_hashes.add(h)
-                self._save_draft_block(block)
-
-    def _save_draft_block(self, draft: str):
-        """Save a new draft block as a file and update lineage."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"report_v{self.current_outer_turn}_{self.current_inner_turn}_{timestamp}.md"
-        path = os.path.join(self.config.draft_dir, filename)
-        header = f'''---
-iteration: Outer {self.current_outer_turn}, Inner {self.current_inner_turn}
-timestamp: {timestamp}
-feedback: |
-  No feedback yet
----
-
-'''
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(header + draft)
-        self.draft_lineage.append({
-            "iteration": f"{self.current_outer_turn}_{self.current_inner_turn}",
-            "file": path,
-            "feedback": "",
-            "timestamp": timestamp
-        })
-        print(f"  📄 Draft saved: {filename}")
-
-    # ========== OVERRIDES / FLOW ==========
-
+        return max_iteration
+    
     def run(self, initial_task: str) -> Dict[str, Any]:
         """Run the complete group chat with iteration control."""
         task = initial_task
         final_result = {}
         self.conversation_terminated = False
         
+        print("\n" + "="*80)
+        print("🚀 STARTING GROUP CHAT MANAGER RUN")
+        print("="*80)
+        print(f"  Initial outer_turn: {self.current_outer_turn}")
+        print(f"  Max outer turns: {self.max_outer_turn}")
+        print(f"  Max inner turns: {self.max_inner_turn}")
+        
         # Check for existing artifacts BEFORE starting any iterations
         artifact_summary = ""
         if self.current_outer_turn == 0:  # Only on first run
+            print("\n📦 Checking for existing artifacts...")
             artifact_summary = self.iteration_manager.load_and_summarize_all_artifacts()
             if artifact_summary:
                 print("\n" + "=" * 80)
@@ -887,10 +583,47 @@ feedback: |
                 print("=" * 80)
                 print(artifact_summary)
                 print("=" * 80)
+                
+                # IMPORTANT: Count existing outer iterations to continue from the right number
+                existing_iterations = self._count_existing_outer_iterations()
+                if existing_iterations > 0:
+                    # Set to existing iterations so the NEXT increment goes to existing+1
+                    self.current_outer_turn = existing_iterations
+                    print(f"\n🔄 ADJUSTED current_outer_turn to: {self.current_outer_turn}")
+                    print(f"📊 Will start next iteration at: {self.current_outer_turn + 1}")
+                    
+                    # DON'T pre-update the artifact manager here - let the loop handle it
+                    print(f"🔧 Artifact manager will be updated when loop starts")
+        else:
+            print(f"  ⏭️ Skipping artifact check (current_outer_turn={self.current_outer_turn})")
+        
+        # Add quit check before main loop
+        print("\n💡 TIP: Type 'quit_debug' when prompted to exit with debug info")
         
         while not self.conversation_terminated and self.current_outer_turn < self.max_outer_turn:
+            # Store the previous value for debugging
+            prev_outer = self.current_outer_turn
+            
             self.current_outer_turn += 1
-            self.current_inner_turn = 1  # Start at 1, not 0
+            self.current_inner_turn = 1
+            
+            print(f"\n{'='*80}")
+            print(f"🔄 INCREMENTING OUTER ITERATION")
+            print(f"  Before increment: outer_turn was {prev_outer}")
+            print(f"  After increment: outer_turn is now {self.current_outer_turn}")
+            print(f"  Artifact manager before update: outer={self.artifact_manager.current_outer_turn}, inner={self.artifact_manager.current_inner_turn}")
+            print(f"{'='*80}")
+            
+            # CRITICAL: Update artifact manager's iteration immediately after incrementing
+            self.artifact_manager.set_iteration(self.current_outer_turn, self.current_inner_turn)
+            print(f"✅ After set_iteration call:")
+            print(f"   - GroupChatManager outer_turn: {self.current_outer_turn}")
+            print(f"   - ArtifactManager outer_turn: {self.artifact_manager.current_outer_turn}")
+            
+            # VERIFY the update worked
+            if self.artifact_manager.current_outer_turn != self.current_outer_turn:
+                print(f"❌ ERROR: Artifact manager not synced! Expected {self.current_outer_turn}, got {self.artifact_manager.current_outer_turn}")
+            
             print(f"\n=== Outer Iteration {self.current_outer_turn}/{self.max_outer_turn} ===")
             
             # Clear previous messages for new outer iteration
@@ -954,7 +687,7 @@ Please analyze what has been done and plan the next steps accordingly. If previo
                 result = self.agents["user_proxy"].initiate_chat(
                     self.manager,
                     message=task,
-                    clear_history=False,  # We already cleared it above
+                    clear_history=False,
                     silent=False
                 )
             except Exception as e:
@@ -962,15 +695,20 @@ Please analyze what has been done and plan the next steps accordingly. If previo
                 error_msg = str(e).lower()
                 # Check for various termination indicators in the error message
                 termination_keywords = ["terminating", "no reply generated", "user requested to end", 
-                                       "exit", "stop", "terminate", "quit"]
+                                       "exit", "stop", "terminate", "quit", "quit_debug"]
                 
+                if "quit_debug" in error_msg or (hasattr(e, 'args') and any("quit_debug" in str(arg).lower() for arg in e.args)):
+                    print("\n" + "="*80)
+                    print("🛑 DEBUG QUIT REQUESTED")
+                    print("="*80)
+                    self._print_debug_state()
+                    return {"report": "Debug quit requested.", "debug": True}
+                    
                 if any(keyword in error_msg for keyword in termination_keywords):
                     self.conversation_terminated = True
                     print("\n🛑 Conversation terminated by user.")
                 else:
                     print(f"Chat completed or interrupted: {e}")
-                    # For other exceptions, we might want to continue or handle differently
-                    # but for safety, we'll treat it as termination
                     self.conversation_terminated = True
 
             # Check for admin exit in messages (as backup)
@@ -989,6 +727,7 @@ Please analyze what has been done and plan the next steps accordingly. If previo
             inner_results = self._process_messages_and_save_artifacts()
             
             # Summarize iteration
+            print(f"\n📝 About to summarize iteration {self.current_outer_turn}")
             summary = self.summarize_iteration(inner_results)
             
             # Save to memory
@@ -1024,77 +763,60 @@ Please analyze what has been done and plan the next steps accordingly. If previo
             
         return final_result
     
-    def _process_messages_and_save_artifacts(self) -> Dict[str, Any]:
-        """Process all messages from the chat and save artifacts."""
-        results = {"codes": [], "reports": [], "completed": False}
+    def _print_debug_state(self):
+        """Print comprehensive debug information about current state."""
+        print("\n" + "="*60)
+        print("DEBUG STATE INFORMATION")
+        print("="*60)
+        print(f"Current outer turn: {self.current_outer_turn}")
+        print(f"Current inner turn: {self.current_inner_turn}")
+        print(f"Artifact manager outer: {self.artifact_manager.current_outer_turn}")
+        print(f"Artifact manager inner: {self.artifact_manager.current_inner_turn}")
+        print(f"Code lineage count: {len(self.code_lineage)}")
+        print(f"Draft lineage count: {len(self.draft_lineage)}")
         
-        # Process any new messages - scan and save code/draft blocks
-        self._process_new_messages()
+        print(f"\nArtifact directory: {self.config.artifact_dir}")
+        if os.path.exists(self.config.artifact_dir):
+            files = os.listdir(self.config.artifact_dir)
+            print(f"Files in artifact dir ({len(files)} total):")
+            for f in sorted(files)[:10]:  # Show first 10
+                print(f"  - {f}")
+            if len(files) > 10:
+                print(f"  ... and {len(files) - 10} more files")
+        else:
+            print("  (directory does not exist)")
         
-        # Check if completion was reached
-        if self.check_planner_satisfaction():
-            results["completed"] = True
+        print(f"\nMemory manager history: {len(self.memory_manager.get_iteration_history())} entries")
+        for entry in self.memory_manager.get_iteration_history()[-3:]:  # Last 3
+            print(f"  - Iteration {entry.get('iteration')}: {entry.get('timestamp', 'N/A')[:19]}")
         
-        # Update results
-        results["codes"] = [c["file"] for c in self.code_lineage]
-        results["reports"] = [d["file"] for d in self.draft_lineage]
-        
-        # Update inner turn count based on actual messages processed
-        # Don't override if it's already been updated by the tracking manager
-        agent_messages = [m for m in self.groupchat.messages if m.get("name") in ["Engineer", "Writer", "Executor", "Planner"]]
-        if agent_messages:
-            # Estimate: roughly 4 messages per inner turn (Planner->Engineer->Executor->Planner)
-            estimated_turn = max(1, (len(agent_messages) + 3) // 4)
-            self.current_inner_turn = max(self.current_inner_turn, estimated_turn)
-        
-        return results
-    
-    def _process_new_messages(self):
-        """Process new messages and save code/draft artifacts."""
-        # Scan and save any new code blocks
-        self._scan_and_save_new_code()
-        
-        # Scan and save any new draft blocks
-        self._scan_and_save_new_drafts()
-        
-        # Attach planner feedback to the latest code/draft if available
-        self._attach_planner_feedback()
-        
-        # Update the last processed index
-        self.last_processed_message_index = len(self.groupchat.messages)
-
-    def run_inner_iteration(self, task: str) -> Dict[str, Any]:
-        """DEPRECATED - This method is no longer used. Processing happens in _process_messages_and_save_artifacts."""
-        # This method is kept for backward compatibility but should not be called
-        return {"codes": [], "reports": [], "completed": False}
-
-    def check_planner_satisfaction(self) -> bool:
-        """Check if planner is satisfied with current progress."""
-        # Check last messages for completion signal
-        recent_messages = self.groupchat.messages[-5:] if len(self.groupchat.messages) > 5 else self.groupchat.messages
-        
-        for msg in recent_messages:
-            if msg.get("name") == "Planner" and "REVIEW_COMPLETE" in msg.get("content", ""):
-                return True
-        
-        return False
+        print("="*60)
     
     def summarize_iteration(self, inner_results: Dict[str, Any]) -> Dict[str, Any]:
         """Use summarizer agent to create iteration summary and save to artifact."""
-        print(f"\n📝 Creating iteration summary...")  # Debug
+        print(f"\n📝 Creating iteration summary...")
+        print(f"  🔍 DEBUG: Current outer_turn in summarize_iteration: {self.current_outer_turn}")
+        print(f"  🔍 DEBUG: Artifact manager outer_turn: {self.artifact_manager.current_outer_turn}")
+        
+        # Ensure artifact manager has correct iteration
+        self.artifact_manager.set_iteration(self.current_outer_turn, self.current_inner_turn)
+        print(f"  ✅ Ensured artifact manager is at outer={self.current_outer_turn}, inner={self.current_inner_turn}")
+        
+        # Get stats from artifact manager
+        stats = self.artifact_manager.get_iteration_stats()
         
         # Prepare summary data
         summary_data = {
-            "outer_iteration": self.current_outer_turn,
-            "total_inner_iterations": self.current_inner_turn,
-            "codes_created": len(self.code_lineage),
-            "drafts_created": len(self.draft_lineage),
-            "last_code_success": self.code_lineage[-1]["success"] if self.code_lineage else None,
+            "outer_iteration": stats["outer_iteration"],
+            "total_inner_iterations": stats["inner_iteration"],
+            "codes_created": stats["codes_created"],
+            "drafts_created": stats["drafts_created"],
+            "last_code_success": stats["last_code_success"],
             "completion_status": inner_results.get("completed", False)
         }
         
-        print(f"  - Codes created: {summary_data['codes_created']}")  # Debug
-        print(f"  - Drafts created: {summary_data['drafts_created']}")  # Debug
+        print(f"  - Codes created: {summary_data['codes_created']}")
+        print(f"  - Drafts created: {summary_data['drafts_created']}")
         
         # Check if we already have a summarizer output from the conversation
         if hasattr(self, 'last_summarizer_output') and self.last_summarizer_output:
@@ -1127,14 +849,15 @@ Please analyze what has been done and plan the next steps accordingly. If previo
             "artifacts": inner_results,
             "summary_text": summary_response,
             "metrics": summary_data,
-            "code_lineage": self.code_lineage,  # Include full lineage
-            "draft_lineage": self.draft_lineage,  # Include full lineage
+            "code_lineage": self.artifact_manager.get_code_lineage(),
+            "draft_lineage": self.artifact_manager.get_draft_lineage(),
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S")
         }
         
-        # Save to artifact - this is the critical part
-        artifact_file = self.save_iteration_summary_to_artifact(summary)
-        print(f"  ✅ Artifact file path: {artifact_file}")  # Debug
+        # Save to artifact
+        print(f"  💾 About to save artifact for iteration {self.current_outer_turn}")
+        artifact_file = self.artifact_manager.save_iteration_summary_to_artifact(summary)
+        print(f"  ✅ Artifact file path: {artifact_file}")
         
         # Verify the file was actually created
         if os.path.exists(artifact_file):
@@ -1153,99 +876,74 @@ Please analyze what has been done and plan the next steps accordingly. If previo
         
         return summary
     
-    def get_user_feedback(self, summary: Dict[str, Any]) -> Dict[str, Any]:
-        """Get feedback from user on current iteration."""
-        print("\n--- Iteration Summary ---")
-        print(summary.get("summary_text", "No summary available"))
-        print("\n" + "-" * 40)
+    def _scan_and_save_new_code(self):
+        """Scan for new code blocks in messages and save them."""
+        msgs = self.groupchat.messages
+        print(f"  🔍 Scanning {len(msgs)} messages for code...")
+        print(f"  🔍 DEBUG: Current outer_turn={self.current_outer_turn}, inner_turn={self.current_inner_turn}")
         
-        # In actual implementation, this would wait for user input
-        # For now, simulate feedback structure
-        return {
-            "continue": True,
-            "refinements": "",
-            "approved": False
-        }
-    
-    def update_task_with_feedback(self, task: str, feedback: str) -> str:
-        """Update task based on user feedback."""
-        if feedback:
-            return f"{task}\n\nAdditional requirements based on feedback:\n{feedback}"
-        return task
-    
-    def compile_final_report(self, result: Dict[str, Any]) -> str:
-        """Compile the final report from all iterations."""
-        # Get the latest report
-        reports = result.get("inner_results", {}).get("reports", [])
-        if reports:
-            latest_report = reports[-1]
-            with open(latest_report, "r", encoding="utf-8") as f:
-                return f.read()
-        return "No report generated."
-    
-    def _admin_exit_detected(self) -> bool:
-        """Return True if Admin signaled termination."""
-        if not self.groupchat.messages:
-            return False
-        # Scan last few messages
-        for msg in reversed(self.groupchat.messages[-8:]):
+        # Look for code blocks in messages
+        for i in range(self.last_processed_message_index, len(msgs)):
+            msg = msgs[i]
+            if msg.get("name") == "Engineer":
+                content = msg.get("content", "")
+                # Extract Python code blocks
+                code_blocks = self._extract_python_blocks(content)
+                for code in code_blocks:
+                    if code.strip():
+                        # Check for duplicates
+                        code_hash = self._hash(code)
+                        if code_hash not in self._saved_code_hashes:
+                            # Save new code iteration
+                            filepath = self.artifact_manager.save_code_iteration(code, success=False)
+                            print(f"    ✅ New code saved to {filepath}")
+                            self._saved_code_hashes.add(code_hash)
+                        else:
+                            print(f"    ⏭️ Duplicate code block, not saving")
+            
+            # Check for termination command in any message
             if isinstance(msg, dict) and msg.get("name") == "Admin":
-                content = (msg.get("content") or "").lower()
-                if any(term in content for term in self._exit_terms) or "terminating run" in content:
-                    return True
-        return False
+                content = msg.get("content", "").lower()
+                if "terminate" in content or "exit" in content or "stop" in content:
+                    print("  🛑 Termination command received")
+                    self.conversation_terminated = True
+                    break
+        
+        # Update the last processed index
+        self.last_processed_message_index = len(msgs)
 
-    def _build_context_message(self, prev_context: Dict[str, Any]) -> str:
-        """Build a context message from previous iteration data."""
-        context_parts = []
+    def _scan_and_save_new_drafts(self):
+        """Scan for new draft blocks in messages and save them."""
+        msgs = self.groupchat.messages
+        print(f"  🔍 Scanning {len(msgs)} messages for drafts...")
+        print(f"  🔍 DEBUG: Current outer_turn={self.current_outer_turn}, inner_turn={self.current_inner_turn}")
         
-        # Add summary from previous iteration
-        if "summary_text" in prev_context:
-            context_parts.append(f"**Previous Iteration Summary:**\n{prev_context['summary_text']}")
+        # Look for draft blocks in messages
+        for i in range(self.last_processed_message_index, len(msgs)):
+            msg = msgs[i]
+            if msg.get("name") == "Writer":
+                content = msg.get("content", "")
+                # Extract Markdown draft blocks
+                draft_blocks = self._extract_md_blocks(content)
+                for draft in draft_blocks:
+                    if draft.strip():
+                        # Check for duplicates
+                        draft_hash = self._hash(draft)
+                        if draft_hash not in self._saved_draft_hashes:
+                            # Save new draft iteration
+                            filepath = self.artifact_manager.save_draft_iteration(draft)
+                            print(f"    ✅ New draft saved to {filepath}")
+                            self._saved_draft_hashes.add(draft_hash)
+                        else:
+                            print(f"    ⏭️ Duplicate draft block, not saving")
+            
+            # Check for termination command in any message
+            if isinstance(msg, dict) and msg.get("name") == "Admin":
+                content = msg.get("content", "").lower()
+                if "terminate" in content or "exit" in content or "stop" in content:
+                    print("  🛑 Termination command received")
+                    self.conversation_terminated = True
+                    break
         
-        # Add information about code artifacts
-        if "code_lineage" in prev_context and prev_context["code_lineage"]:
-            last_code = prev_context["code_lineage"][-1]
-            context_parts.append(f"\n**Last Code Status:**\n- File: {last_code.get('file', 'N/A')}\n- Success: {last_code.get('success', 'N/A')}\n- Feedback: {last_code.get('feedback', 'None')}")
-        
-        # Add information about draft artifacts  
-        if "draft_lineage" in prev_context and prev_context["draft_lineage"]:
-            last_draft = prev_context["draft_lineage"][-1]
-            context_parts.append(f"\n**Last Draft Status:**\n- File: {last_draft.get('file', 'N/A')}\n- Feedback: {last_draft.get('feedback', 'None')}")
-        
-        # Add metrics
-        if "metrics" in prev_context:
-            metrics = prev_context["metrics"]
-            context_parts.append(f"\n**Metrics from Previous Iteration:**\n- Codes created: {metrics.get('codes_created', 0)}\n- Drafts created: {metrics.get('drafts_created', 0)}\n- Completion status: {metrics.get('completion_status', False)}")
-        
-        return "\n".join(context_parts)
-    
-    def _get_all_previous_artifacts(self) -> str:
-        """Get summary of all previous artifacts from all iterations."""
-        artifact_summary = []
-        
-        # Get all artifact files
-        artifact_files = []
-        if os.path.exists(self.config.artifact_dir):
-            for filename in os.listdir(self.config.artifact_dir):
-                if filename.startswith("summary_outer") and filename.endswith(".json"):
-                    artifact_files.append(os.path.join(self.config.artifact_dir, filename))
-        
-        # Sort by filename (which includes timestamp)
-        artifact_files.sort()
-        
-        if artifact_files:
-            artifact_summary.append("**All Previous Iterations Overview:**")
-            for i, filepath in enumerate(artifact_files, 1):
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        outer_iter = data.get("outer_iteration", i)
-                        inner_turns = data.get("total_inner_iterations", 0)
-                        codes = len(data.get("code_lineage", []))
-                        drafts = len(data.get("draft_lineage", []))
-                        artifact_summary.append(f"- Iteration {outer_iter}: {inner_turns} inner turns, {codes} codes, {drafts} drafts")
-                except:
-                    continue
-        
-        return "\n".join(artifact_summary) if artifact_summary else ""
+        # Update the last processed index
+        self.last_processed_message_index = len(msgs)
