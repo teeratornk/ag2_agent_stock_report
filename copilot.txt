@@ -1,0 +1,125 @@
+create a project adhere to SOLID principle, all python scripts should be in working directory no need to create sub directory for 
+python codes
+
+use llm_config from config.py
+
+default task is (but one could have an option to provide the user prompt)
+task = "Write a blogpost about the stock price performance of "\
+"Nvidia in the past month. Today's date is 2024-04-23."
+
+Build a group chat
+This group chat will include these agents:
+
+User_proxy or Admin: to allow the user to comment on the report and ask the writer to refine it.
+
+Planner: to determine relevant information needed to complete the task.
+Planner: Optimizes content for search engines and web discoverability and Verifies factual accuracy and identifies unsupported claims
+Planner: to provide feedback to Engineer (code quality, if any Executor fails - provide feedback to Engineer to write a better code)
+
+Engineer: to write code using the defined plan by the planner.
+Executor: to execute the code written by the engineer.
+Writer: to write the report.
+
+import autogen (ag2 - https://github.com/ag2ai/ag2)
+
+user_proxy = autogen.ConversableAgent(
+    name="Admin",
+    system_message="Give the task, and send "
+    "instructions to writer to refine the blog post.",
+    code_execution_config=False,
+    llm_config=llm_config,
+    human_input_mode="ALWAYS",
+)
+
+planner = autogen.ConversableAgent(
+    name="Planner",
+    system_message="Given a task, please determine "
+    "what information is needed to complete the task. "
+    "Please note that the information will all be retrieved using"
+    " Python code. Please only suggest information that can be "
+    "retrieved using Python code. "
+    "After each step is done by others, check the progress and "
+    "instruct the remaining steps. If a step fails, try to "
+    "workaround",
+    description="Planner. Given a task, determine what "
+    "information is needed to complete the task. "
+    "After each step is done by others, check the progress and "
+    "instruct the remaining steps",
+    llm_config=llm_config,
+)
+
+engineer = autogen.AssistantAgent(
+    name="Engineer",
+    llm_config=llm_config,
+    description="An engineer that writes code based on the plan "
+    "provided by the planner.",
+)
+
+executor = autogen.ConversableAgent(
+    name="Executor",
+    system_message="Execute the code written by the "
+    "engineer and report the result.",
+    human_input_mode="NEVER",
+    code_execution_config={
+        "last_n_messages": 3,
+        "work_dir": "coding",
+        "use_docker": False,
+    },
+)
+
+writer = autogen.ConversableAgent(
+    name="Writer",
+    llm_config=llm_config,
+    system_message="Writer."
+    "Please write blogs in markdown format (with relevant titles)"
+    " and put the content in pseudo ```md``` code block. "
+    "You take feedback from the admin and refine your blog.",
+    description="Writer."
+    "Write blogs based on the code execution results and take "
+    "feedback from the admin to refine the blog."
+)
+
+TODO - add summarizer - summarize what happen in each outer_iteration to both user and save an artifact to make memory persist
+
+define groupchat
+
+groupchat = autogen.GroupChat(
+    agents=[user_proxy, engineer, writer, executor, planner],
+    messages=[],
+    max_round=10,
+    allowed_or_disallowed_speaker_transitions={
+        user_proxy: [planner],
+        planner: [summarizer, engineer, writer], -> review the code + results + errors, review the writing and provide feedback, if there are no more comments , call summarizer else call engineer/writer to address the comments
+        engineer: [executor], -> call executor to execute the code -> both for data mining, feature engineering, and plotting
+        executor: [planner], -> call planner using the executed code, results or any errors
+        writer: [planner], -> grab the results and start writing
+        summarizer: [user_proxy],
+    },
+    speaker_transitions_type="allowed",
+)
+
+manager = autogen.GroupChatManager(
+    groupchat=groupchat, llm_config=llm_config
+)
+
+groupchat_result = user_proxy.initiate_chat(
+    manager,
+    message=task, -> TODO, we can have a default or user can input its own prompt
+)
+
+we have two max_turn
+max_inner_turn -> inner working round and it will end on either max_inner_turn reaches or planner and planner have no 
+further comments and planner decide to ask user for feedback (max_outer_turn count as one), inner_turn counts when each intermediate
+report is created, i.e., if max_inner_turn sets to 10 there should be 10 reports created or it can be less when planner and planner have no 
+further comments
+max_outer_turn -> outer working round it will end on either max_outer_turn reaches or user has no further comment 
+
+we also want memory to persist so, for each iteration -> summarizer + artifact
+
+We use coding folder to contain 'working' codes -> planner looks at the code and executor result, then provide comments on the code. The feedback to engineer is its old code + comments
+We use draft folder to contain 'working' writing  -> planner looks at the writing, then provide comments on the code. The feedback to engineer is its old writing + comments
+
+for both we have to save history of codes and writing so that summarizer can use it to summarize and communitcate to the next iteration 
+
+We use artifact folder to contain 'memory' of each outer_iteration, this will be json that contain the key point of each iteration results
+We use output folder to save the final reports and all figures associated to the report
