@@ -428,3 +428,14 @@ Original draft below:
                 (self.draft_lineage and self.draft_lineage[-1].get("feedback"))
             )
         }
+    
+    def reset_for_new_iteration(self):
+        """Reset internal tracking for a new outer iteration."""
+        # Clear the lineages for the new iteration
+        self.code_lineage.clear()
+        self.draft_lineage.clear()
+        
+        # Reset any file counters
+        self.file_counter = 0
+        
+        print(f"  🔄 Reset artifact manager lineages for iteration {self.current_outer_turn}")

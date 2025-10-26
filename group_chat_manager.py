@@ -13,28 +13,68 @@ class CustomGroupChatManagerWithTracking(autogen.GroupChatManager):
         self.custom_manager = custom_manager  # Reference to our CustomGroupChatManager
         self.planner_message_count = 0  # Track number of planner messages
         self.message_count = 0  # Track total messages for inner turn calculation
+        self.admin_message_count = 0  # Track Admin messages to detect new outer iterations
         
     def _process_received_message(self, message, sender, silent=False):
         """Process messages and save artifacts in real-time."""
         # Call parent implementation first
         result = super()._process_received_message(message, sender, silent)
         
-        # Increment message count for agents (not Admin)
+        # Extract message content and sender name
+        content = message.get("content", "") if isinstance(message, dict) else str(message)
         sender_name = sender.name if hasattr(sender, 'name') else str(sender)
+        
+        # CRITICAL: Detect new outer iteration when Admin sends a message after Summarizer
+        if sender_name == "Admin" and self.custom_manager:
+            self.admin_message_count += 1
+            # Check if the previous speaker was Summarizer (indicates new outer iteration)
+            if len(self.groupchat.messages) > 1:
+                prev_msg = self.groupchat.messages[-2] if len(self.groupchat.messages) > 1 else None
+                if prev_msg and prev_msg.get("name") == "Summarizer":
+                    # This is a new outer iteration!
+                    print(f"\n{'='*80}")
+                    print(f"🔄 NEW OUTER ITERATION DETECTED (Admin after Summarizer)")
+                    
+                    # Save the current iteration's summary before incrementing
+                    if self.custom_manager.last_summarizer_output:
+                        print(f"  💾 Saving summary for iteration {self.custom_manager.current_outer_turn}")
+                        inner_results = {
+                            "completed": True,
+                            "code_created": len(self.custom_manager.code_lineage) > 0,
+                            "report_created": len(self.custom_manager.draft_lineage) > 0,
+                            "execution_success": True,
+                            "artifacts": {
+                                "codes": len(self.custom_manager.code_lineage),
+                                "drafts": len(self.custom_manager.draft_lineage),
+                            }
+                        }
+                        summary = self.custom_manager.summarize_iteration(inner_results)
+                    
+                    # Now increment for the new iteration
+                    self.custom_manager.current_outer_turn += 1
+                    self.custom_manager.current_inner_turn = 1
+                    self.message_count = 0  # Reset inner message count
+                    
+                    print(f"  ➡️ Starting Outer Iteration {self.custom_manager.current_outer_turn}")
+                    print(f"{'='*80}\n")
+                    
+                    # Update artifact manager
+                    self.custom_manager.artifact_manager.set_iteration(
+                        self.custom_manager.current_outer_turn,
+                        self.custom_manager.current_inner_turn
+                    )
+        
+        # Increment message count for agents (not Admin)
         if sender_name in ["Engineer", "Writer", "Executor", "Planner", "Summarizer"]:
             self.message_count += 1
             # Update inner turn count in custom_manager
             if self.custom_manager:
                 self.custom_manager.current_inner_turn = max(1, (self.message_count + 3) // 4)
-                # CRITICAL FIX: Always update artifact manager's iteration with current values
+                # Update artifact manager's iteration with current values
                 self.custom_manager.artifact_manager.set_iteration(
                     self.custom_manager.current_outer_turn,
                     self.custom_manager.current_inner_turn
                 )
-        
-        # Extract message content and sender name
-        content = message.get("content", "") if isinstance(message, dict) else str(message)
-        sender_name = sender.name if hasattr(sender, 'name') else str(sender)
         
         print(f"  📨 Processing message from {sender_name} (length: {len(content)})")
         
@@ -91,8 +131,45 @@ class CustomGroupChatManagerWithTracking(autogen.GroupChatManager):
                 # Capture summary from Summarizer
                 elif sender_name == "Summarizer":
                     print(f"    📊 Summarizer output detected")
+                    
+                    # Print the summarization
+                    print("\n" + "="*80)
+                    print("📊 ITERATION SUMMARY")
+                    print("="*80)
+                    print(content)
+                    print("="*80 + "\n")
+                    
+                    # Save the summarizer output
                     self.custom_manager.artifact_manager.save_summarizer_output(content)
                     self.custom_manager.last_summarizer_output = content
+                    
+                    # CRITICAL: Save the iteration summary immediately when Summarizer speaks
+                    if self.custom_manager:
+                        print(f"  💾 Saving iteration {self.custom_manager.current_outer_turn} summary...")
+                        
+                        # Create inner results based on current state
+                        inner_results = {
+                            "completed": True,
+                            "code_created": len(self.custom_manager.code_lineage) > 0,
+                            "report_created": len(self.custom_manager.draft_lineage) > 0,
+                            "execution_success": self.custom_manager.check_execution_success(),
+                            "artifacts": {
+                                "codes": len(self.custom_manager.code_lineage),
+                                "drafts": len(self.custom_manager.draft_lineage),
+                            }
+                        }
+                        
+                        # Save the JSON summary
+                        summary = self.custom_manager.summarize_iteration(inner_results)
+                        
+                        print(f"  ✅ Iteration {self.custom_manager.current_outer_turn} summary saved")
+                        
+                        # Check if we've reached max outer turns
+                        if self.custom_manager.current_outer_turn >= self.custom_manager.max_outer_turn:
+                            print(f"\n🏁 Reached maximum outer iterations ({self.custom_manager.max_outer_turn})")
+                            print("  Terminating conversation...")
+                            # Signal termination by returning a special message
+                            return {"content": "TERMINATE: Max iterations reached", "name": "system"}
             
             except Exception as e:
                 print(f"    ❌ Error saving artifact: {e}")
@@ -165,11 +242,25 @@ class CustomGroupChatManager:
             if isinstance(msg, dict):
                 content = msg.get("content", "").lower()
                 name = msg.get("name", "")
+                
+                # CRITICAL: Terminate after Summarizer to move to next outer iteration
+                if name == "Summarizer":
+                    print("\n🔄 Summarizer completed - ending current iteration")
+                    # Check if we should continue to next iteration
+                    if self.current_outer_turn < self.max_outer_turn:
+                        print(f"  ➡️ Will continue to iteration {self.current_outer_turn + 1}")
+                    else:
+                        print(f"  🏁 Reached max iterations ({self.max_outer_turn})")
+                    return True  # Terminate inner loop after Summarizer
+                
                 # Check for termination signals using class-level exit terms
                 if name == "Admin" and any(term in content for term in self._exit_terms):
                     return True
                 # Also check for the termination run messages
                 if "terminating run" in content.lower():
+                    return True
+                # Check for system termination message
+                if "terminate: max iterations reached" in content.lower():
                     return True
             return False
         
@@ -404,6 +495,67 @@ class CustomGroupChatManager:
         
         return "reviewing"  # Next phase after writing
     
+    def _admin_exit_detected(self) -> bool:
+        """Check if Admin requested to exit the conversation."""
+        # Check recent messages for admin exit commands
+        for msg in reversed(self.groupchat.messages[-5:]):  # Check last 5 messages
+            if isinstance(msg, dict) and msg.get("name") == "Admin":
+                content = msg.get("content", "").lower()
+                if any(term in content for term in self._exit_terms):
+                    return True
+        return False
+    
+    def compile_final_report(self, additional_info: Dict[str, Any] = None) -> str:
+        """Compile the final report from all draft iterations."""
+        if not self.draft_lineage:
+            return "No report drafts were generated."
+        
+        # Get the latest draft
+        latest_draft = self.draft_lineage[-1]
+        
+        # Extract the draft content
+        if "content" in latest_draft:
+            report = latest_draft["content"]
+        else:
+            report = "Report content not found."
+        
+        # Add metadata if available
+        if additional_info:
+            report += f"\n\n---\nAdditional Information:\n"
+            for key, value in additional_info.items():
+                report += f"- {key}: {value}\n"
+        
+        # Add summary of iterations if multiple
+        if self.current_outer_turn > 1:
+            report += f"\n\n---\nReport generated after {self.current_outer_turn} iterations.\n"
+        
+        return report
+    
+    def _process_messages_and_save_artifacts(self) -> Dict[str, Any]:
+        """Process all messages and extract artifacts for saving."""
+        # Scan and save any remaining code blocks
+        self._scan_and_save_new_code()
+        
+        # Scan and save any remaining draft blocks
+        self._scan_and_save_new_drafts()
+        
+        # Attach any pending planner feedback
+        self._attach_planner_feedback()
+        
+        # Create results summary
+        inner_results = {
+            "completed": True,
+            "code_created": len(self.code_lineage) > 0,
+            "report_created": len(self.draft_lineage) > 0,
+            "execution_success": self.check_execution_success(),
+            "artifacts": {
+                "codes": len(self.code_lineage),
+                "drafts": len(self.draft_lineage),
+            }
+        }
+        
+        return inner_results
+    
     # ========== SCANNERS & HELPERS ==========
 
     def _hash(self, text: str) -> str:
@@ -569,140 +721,197 @@ class CustomGroupChatManager:
         print(f"  Max outer turns: {self.max_outer_turn}")
         print(f"  Max inner turns: {self.max_inner_turn}")
         
-        # CRITICAL: Check for existing artifacts EVERY time, not just when current_outer_turn == 0
-        # This ensures we always continue from the right iteration
+        # Check for existing artifacts
         print("\n📦 Checking for existing artifacts...")
-        artifact_summary = ""
         
         # Always count existing iterations to determine where to start
         existing_iterations = self._count_existing_outer_iterations()
         
-        # Only load and display artifact summary if we're starting fresh
-        if self.current_outer_turn == 0 and existing_iterations > 0:
-            artifact_summary = self.iteration_manager.load_and_summarize_all_artifacts()
-            if artifact_summary:
-                print("\n" + "=" * 80)
-                print("EXISTING ARTIFACTS DETECTED")
-                print("=" * 80)
-                print(artifact_summary)
-                print("=" * 80)
-        
-        # CRITICAL FIX: Always set current_outer_turn based on existing iterations
-        # if we haven't already progressed past them
-        if existing_iterations > self.current_outer_turn:
+        # Set the starting iteration correctly
+        if existing_iterations > 0:
             self.current_outer_turn = existing_iterations
-            print(f"\n🔄 ADJUSTED current_outer_turn from 0 to: {self.current_outer_turn}")
-            print(f"📊 Will start next iteration at: {self.current_outer_turn + 1}")
-            
-            # Also update the artifact manager to be ready for the next iteration
-            # Note: We don't set it to existing_iterations + 1 here because the loop will increment it
-            print(f"🔧 Artifact manager will be synced when loop starts")
-        elif existing_iterations == self.current_outer_turn and self.current_outer_turn > 0:
-            print(f"  ✅ Already at the correct iteration: {self.current_outer_turn}")
-        elif self.current_outer_turn > existing_iterations:
-            print(f"  ⚠️ Current outer_turn ({self.current_outer_turn}) is ahead of artifacts ({existing_iterations})")
+            print(f"\n🔄 Found {existing_iterations} completed iteration(s)")
+            print(f"📊 Starting at iteration: {self.current_outer_turn + 1}")
+        else:
+            self.current_outer_turn = 0
+            print(f"\n🆕 Starting fresh from iteration 1")
         
-        # Add quit check before main loop
-        print("\n💡 TIP: Type 'quit_debug' when prompted to exit with debug info")
-        
-        while not self.conversation_terminated and self.current_outer_turn < self.max_outer_turn:
-            # Store the previous value for debugging
-            prev_outer = self.current_outer_turn
-            
+        # MULTIPLE OUTER ITERATIONS LOOP
+        while self.current_outer_turn < self.max_outer_turn and not self.conversation_terminated:
+            # Increment for the current iteration
             self.current_outer_turn += 1
             self.current_inner_turn = 1
             
-            print(f"\n{'='*80}")
-            print(f"🔄 INCREMENTING OUTER ITERATION")
-            print(f"  Before increment: outer_turn was {prev_outer}")
-            print(f"  After increment: outer_turn is now {self.current_outer_turn}")
-            print(f"  Artifact manager before update: outer={self.artifact_manager.current_outer_turn}, inner={self.artifact_manager.current_inner_turn}")
-            print(f"{'='*80}")
+            print(f"\n" + "="*80)
+            print(f"🚀 STARTING OUTER ITERATION {self.current_outer_turn}/{self.max_outer_turn}")
+            print("="*80)
             
-            # CRITICAL: Update artifact manager's iteration immediately after incrementing
+            # Update artifact manager
             self.artifact_manager.set_iteration(self.current_outer_turn, self.current_inner_turn)
-            print(f"✅ After set_iteration call:")
-            print(f"   - GroupChatManager outer_turn: {self.current_outer_turn}")
-            print(f"   - ArtifactManager outer_turn: {self.artifact_manager.current_outer_turn}")
             
-            # VERIFY the update worked
-            if self.artifact_manager.current_outer_turn != self.current_outer_turn:
-                print(f"❌ ERROR: Artifact manager not synced! Expected {self.current_outer_turn}, got {self.artifact_manager.current_outer_turn}")
-            
-            print(f"\n=== Outer Iteration {self.current_outer_turn}/{self.max_outer_turn} ===")
-            
-            # Clear previous messages for new outer iteration
-            self.groupchat.messages.clear()
+            # Reset message tracking for new iteration
             self.last_processed_message_index = 0
             
-            # Reset message counts in the tracking manager
-            if hasattr(self.manager, 'planner_message_count'):
-                self.manager.planner_message_count = 0
-            if hasattr(self.manager, 'message_count'):
-                self.manager.message_count = 0
-            
-            # Prepare context message
+            # CRITICAL: Load context from ALL previous iterations
             context_message = ""
             
-            # For the first iteration, include the artifact summary if it exists
-            if self.current_outer_turn == 1 and artifact_summary:
-                context_message = f"""
-{artifact_summary}
-
-Based on the existing artifacts found above, please analyze what has been done and determine the best approach for the current task.
-"""
+            # For ANY iteration, check if there are previous artifacts to load
+            if self.current_outer_turn == 1 and existing_iterations > 0:
+                # First iteration but there are existing artifacts from previous runs
+                print("\n📚 Loading artifacts from previous session...")
+                artifact_summary = self.iteration_manager.load_and_summarize_all_artifacts()
+                if artifact_summary:
+                    print("\n" + "=" * 80)
+                    print("EXISTING ARTIFACTS FROM PREVIOUS SESSION")
+                    print("=" * 80)
+                    print(artifact_summary)
+                    print("=" * 80)
+                    context_message = f"{artifact_summary}\n\nBased on the existing artifacts found above, please analyze what has been done and determine the best approach for the current task."
             
-            # For subsequent iterations, load context from the previous iteration
-            if self.current_outer_turn > 1:
+            elif self.current_outer_turn > 1:
+                # For iterations > 1, load context from ALL previous iterations in this session
+                print("\n📚 Loading context from previous iterations...")
+                
+                # First, get the immediate previous iteration context
                 prev_context = self.load_previous_iteration_context()
-                if prev_context:
-                    # Build a context message from the previous iteration
-                    context_message = self._build_context_message(prev_context)
+                if prev_context and "summary_text" in prev_context:
+                    print("  ✅ Loaded previous iteration summary")
+                    context_message = f"**Previous Iteration {self.current_outer_turn - 1} Summary:**\n{prev_context['summary_text']}\n\n"
                     
-                    # Also check for any existing code and drafts from all previous iterations
-                    existing_artifacts = self._get_all_previous_artifacts()
-                    if existing_artifacts:
-                        context_message += f"\n\n{existing_artifacts}"
+                    # Add metrics from previous iteration
+                    if "metrics" in prev_context:
+                        metrics = prev_context["metrics"]
+                        context_message += f"**Previous Iteration Metrics:**\n"
+                        context_message += f"- Codes created: {metrics.get('codes_created', 0)}\n"
+                        context_message += f"- Drafts created: {metrics.get('drafts_created', 0)}\n"
+                        context_message += f"- Last code success: {metrics.get('last_code_success', 'N/A')}\n\n"
+                
+                # Also check if we need to load context from even earlier iterations
+                if self.current_outer_turn > 2:
+                    # Load summary of ALL previous iterations
+                    all_prev_summary = self.iteration_manager.get_all_previous_artifacts()
+                    if all_prev_summary:
+                        context_message = f"**Overview of All Previous Iterations:**\n{all_prev_summary}\n\n{context_message}"
+                
+                # Check for any artifacts from previous sessions if this is still early in the current session
+                if self.current_outer_turn <= 2 and existing_iterations > 0:
+                    # Also include context from previous sessions
+                    print("  📂 Including context from previous session artifacts...")
+                    prev_session_summary = self.iteration_manager.load_and_summarize_all_artifacts()
+                    if prev_session_summary:
+                        context_message = f"**Previous Session Work:**\n{prev_session_summary}\n\n{context_message}"
             
-            # Update the task to include context if we have any
+            # Build the task message for this iteration
             if context_message:
-                task = f"""Context from previous work:
+                if self.current_outer_turn == 1:
+                    # First iteration - use the original task with context
+                    iteration_task = f"""Context from previous work:
 {context_message}
 
 Current task:
 {initial_task}
 
 Please analyze what has been done and plan the next steps accordingly. If previous work exists and is satisfactory, you may focus on refinements or declare the task complete."""
+                else:
+                    # CRITICAL: For iterations > 1, PROMPT THE USER for specific instructions
+                    print("\n" + "="*80)
+                    print(f"📝 ITERATION {self.current_outer_turn} USER INPUT REQUIRED")
+                    print("="*80)
+                    
+                    # Show the user the context
+                    print("\n📊 Context from previous iterations:")
+                    print("-" * 60)
+                    print(context_message)
+                    print("-" * 60)
+                    
+                    print(f"\n🎯 Original task: {initial_task}")
+                    print(f"\n📌 This is iteration {self.current_outer_turn} of {self.max_outer_turn}")
+                    
+                    # Prompt user for specific instructions
+                    print("\n" + "="*60)
+                    print("Please provide your feedback and instructions for this iteration.")
+                    print("You can:")
+                    print("  1. Specify what to improve or fix")
+                    print("  2. Request new features or analysis")
+                    print("  3. Ask to focus on specific aspects")
+                    print("  4. Type 'continue' to let agents decide improvements")
+                    print("  5. Type 'approve' to accept current results and exit")
+                    print("="*60)
+                    
+                    user_input = input("\n👤 Your instructions for iteration " + str(self.current_outer_turn) + ": ").strip()
+                    
+                    # Check if user wants to exit
+                    if user_input.lower() in ['approve', 'approved', 'exit', 'quit', 'stop']:
+                        print("\n✅ User approved current results. Ending iterations.")
+                        self.conversation_terminated = True
+                        break
+                    
+                    # Build the iteration task with user input
+                    if user_input.lower() == 'continue' or not user_input:
+                        # User wants agents to decide
+                        iteration_task = f"""{context_message}Based on the previous iteration(s), please continue improving the solution.
+
+Original task: {initial_task}
+
+The user has asked you to continue and decide what improvements to make.
+Focus on:
+1. Addressing any issues or errors from the previous iteration
+2. Improving code quality and error handling
+3. Enhancing the report with more insights
+4. Optimizing performance or adding new features
+
+This is iteration {self.current_outer_turn} of {self.max_outer_turn}. Build upon the previous work."""
+                    else:
+                        # Use the specific user instructions
+                        iteration_task = f"""{context_message}Based on the previous iteration(s), please improve the solution according to user feedback.
+
+Original task: {initial_task}
+
+**USER INSTRUCTIONS FOR THIS ITERATION:**
+{user_input}
+
+This is iteration {self.current_outer_turn} of {self.max_outer_turn}. Focus on addressing the user's specific requests above."""
+                    
+                    print(f"\n✅ User input received. Starting iteration {self.current_outer_turn}...")
+            else:
+                # No previous context, start fresh (shouldn't happen often)
+                iteration_task = f"""{initial_task}
+
+This is iteration {self.current_outer_turn} of {self.max_outer_turn}."""
             
-            # Initialize conversation with user proxy for this outer iteration
+            # Clear the last summarizer output for this new iteration
+            self.last_summarizer_output = None
+            
+            # Initialize conversation for this iteration
             try:
-                # Start the chat which will run up to max_inner_turn rounds
-                print(f"--- Starting conversation (max {self.max_inner_turn} rounds) ---")
+                print(f"\n--- Starting iteration {self.current_outer_turn} conversation (max {self.max_inner_turn} rounds) ---")
                 
-                # Show context being provided if any
-                if context_message:
-                    print("\n📚 Providing context to Planner...")
-                    if artifact_summary and self.current_outer_turn == 1:
-                        print(f"  - Found existing artifacts from previous sessions")
-                    if self.current_outer_turn > 1:
-                        print(f"  - Previous outer iterations completed: {self.current_outer_turn - 1}")
-                    print(f"  - Total codes created so far: {len(self.code_lineage)}")
-                    print(f"  - Total drafts created so far: {len(self.draft_lineage)}")
+                # Create a fresh group chat for this iteration (with message history cleared)
+                self.groupchat.messages.clear()
                 
+                # Initiate chat for this iteration
                 result = self.agents["user_proxy"].initiate_chat(
                     self.manager,
-                    message=task,
-                    clear_history=False,
+                    message=iteration_task,
+                    clear_history=True,  # Clear agent history for each iteration
                     silent=False
                 )
+                
+                print(f"\n✅ Iteration {self.current_outer_turn} completed successfully")
+                
+                # Check if user requested termination
+                if self._admin_exit_detected():
+                    print("\n🛑 User requested termination")
+                    self.conversation_terminated = True
+                    break
+                
             except Exception as e:
                 # Check if the exception indicates termination
                 error_msg = str(e).lower()
-                # Check for various termination indicators in the error message
                 termination_keywords = ["terminating", "no reply generated", "user requested to end", 
                                        "exit", "stop", "terminate", "quit", "quit_debug"]
                 
-                if "quit_debug" in error_msg or (hasattr(e, 'args') and any("quit_debug" in str(arg).lower() for arg in e.args)):
+                if "quit_debug" in error_msg:
                     print("\n" + "="*80)
                     print("🛑 DEBUG QUIT REQUESTED")
                     print("="*80)
@@ -710,68 +919,69 @@ Please analyze what has been done and plan the next steps accordingly. If previo
                     return {"report": "Debug quit requested.", "debug": True}
                     
                 if any(keyword in error_msg for keyword in termination_keywords):
-                    self.conversation_terminated = True
-                    print("\n🛑 Conversation terminated by user.")
+                    # This is expected when Summarizer terminates the inner loop
+                    print(f"\n✅ Iteration {self.current_outer_turn} completed (terminated by Summarizer)")
                 else:
-                    print(f"Chat completed or interrupted: {e}")
-                    self.conversation_terminated = True
-
-            # Check for admin exit in messages (as backup)
-            if not self.conversation_terminated and self._admin_exit_detected():
-                self.conversation_terminated = True
+                    print(f"\n⚠️ Iteration {self.current_outer_turn} ended with: {e}")
                 
-            # Process the messages that were generated during the chat
-            inner_results = self._process_messages_and_save_artifacts()
+                # Check if user explicitly requested to stop
+                if self._admin_exit_detected():
+                    print("\n🛑 User requested termination")
+                    self.conversation_terminated = True
+                    break
             
-            # CRITICAL: Always summarize iteration even if terminating
-            print(f"\n📝 About to summarize iteration {self.current_outer_turn}")
-            summary = self.summarize_iteration(inner_results)
+            # After each iteration, save any remaining artifacts if needed
+            if not self.last_summarizer_output:
+                print(f"\n📝 Saving iteration {self.current_outer_turn} artifacts...")
+                inner_results = self._process_messages_and_save_artifacts()
+                if inner_results["code_created"] or inner_results["report_created"]:
+                    summary = self.summarize_iteration(inner_results)
             
-            # CRITICAL: Ensure JSON summary is saved even if conversation is terminating
-            if not os.path.exists(os.path.join(self.config.artifact_dir, f"summary_outer{self.current_outer_turn}_*.json")):
-                print(f"  ⚠️ JSON summary not found, forcing save...")
-                # Force save the JSON summary
-                artifact_file = self.artifact_manager.save_iteration_summary_to_artifact(summary)
-                print(f"  ✅ Forced save of JSON summary: {artifact_file}")
-            
-            # If conversation was terminated, break after saving artifacts
-            if self.conversation_terminated:
-                print("\n🛑 Ending conversation after saving artifacts.")
-                return {"report": "Conversation terminated by user.", "terminated": True}
-            
-            # Save to memory (no-op now)
-            self.memory_manager.save_iteration_summary(
-                self.current_outer_turn, summary
-            )
-            
-            # Get user feedback
-            user_feedback = self.get_user_feedback(summary)
-            
+            # Check if we should continue to next iteration
+            print(f"\n📊 Iteration {self.current_outer_turn} of {self.max_outer_turn} complete")
+            if self.current_outer_turn >= self.max_outer_turn:
+                print(f"🏁 Completed all {self.max_outer_turn} iterations")
+                break
+            else:
+                # Ask user if they want to continue to next iteration
+                print(f"\n" + "="*60)
+                print(f"Iteration {self.current_outer_turn} completed.")
+                print(f"Would you like to continue to iteration {self.current_outer_turn + 1}?")
+                print("  - Type 'yes' or press Enter to continue")
+                print("  - Type 'no' or 'exit' to stop")
+                print("="*60)
+                
+                continue_choice = input("\n👤 Continue to next iteration? [yes]/no: ").strip().lower()
+                
+                if continue_choice in ['no', 'n', 'exit', 'quit', 'stop']:
+                    print("\n✅ User chose to stop iterations.")
+                    self.conversation_terminated = True
+                    break
+                else:
+                    print(f"\n➡️ Continuing to iteration {self.current_outer_turn + 1}...")
+                    # Small delay between iterations
+                    import time
+                    time.sleep(2)
+        
+        # Generate final report
+        print("\n" + "="*80)
+        print("📝 GENERATING FINAL REPORT")
+        print("="*80)
+        
+        if self.draft_lineage:
             final_result = {
                 "iteration": self.current_outer_turn,
-                "inner_results": inner_results,
-                "summary": summary,
-                "user_feedback": user_feedback,
-                "continue": user_feedback.get("continue", True)
+                "report": self.compile_final_report({}),
+                "completed": True,
+                "total_iterations": self.current_outer_turn
             }
-            
-            if not user_feedback.get("continue", True):
-                break
-                
-            # Update task based on feedback
-            if user_feedback.get("refinements"):
-                task = self.update_task_with_feedback(
-                    task, user_feedback["refinements"]
-                )
-
-        # Generate final report only if we have results
-        if final_result:
-            final_result["report"] = self.compile_final_report(final_result)
+            print("✅ Final report generated successfully")
         else:
             final_result = {"report": "Conversation terminated without generating results.", "terminated": True}
-            
+            print("⚠️ No drafts were generated")
+        
         return final_result
-    
+
     def _print_debug_state(self):
         """Print comprehensive debug information about current state."""
         print("\n" + "="*60)
@@ -832,8 +1042,8 @@ Please analyze what has been done and plan the next steps accordingly. If previo
     def summarize_iteration(self, inner_results: Dict[str, Any]) -> Dict[str, Any]:
         """Use summarizer agent to create iteration summary and save to artifact."""
         print(f"\n📝 Creating iteration summary...")
-        print(f"  🔍 DEBUG: Current outer_turn in summarize_iteration: {self.current_outer_turn}")
-        print(f"  🔍 DEBUG: Artifact manager outer_turn: {self.artifact_manager.current_outer_turn}")
+        print(f"  🔍 Current outer_turn in summarize_iteration: {self.current_outer_turn}")
+        print(f"  🔍 Artifact manager outer_turn: {self.artifact_manager.current_outer_turn}")
         
         # Ensure artifact manager has correct iteration
         self.artifact_manager.set_iteration(self.current_outer_turn, self.current_inner_turn)
@@ -855,13 +1065,13 @@ Please analyze what has been done and plan the next steps accordingly. If previo
         print(f"  - Codes created: {summary_data['codes_created']}")
         print(f"  - Drafts created: {summary_data['drafts_created']}")
         
-        # Check if we already have a summarizer output from the conversation
+        # Use the captured summarizer output
         summary_response = ""
         if hasattr(self, 'last_summarizer_output') and self.last_summarizer_output:
-            print(f"  - Using captured Summarizer output")
+            print(f"  ✅ Using captured Summarizer output")
             summary_response = self.last_summarizer_output
         else:
-            print(f"  - No captured summarizer output, checking artifact files...")
+            print(f"  ⚠️ No captured summarizer output, checking artifact files...")
             
             # Try to load from the saved summarizer_output file for this iteration
             summarizer_file = None
@@ -872,7 +1082,7 @@ Please analyze what has been done and plan the next steps accordingly. If previo
                         break
             
             if summarizer_file and os.path.exists(summarizer_file):
-                print(f"  - Found summarizer file: {os.path.basename(summarizer_file)}")
+                print(f"  ✅ Found summarizer file: {os.path.basename(summarizer_file)}")
                 try:
                     with open(summarizer_file, "r", encoding="utf-8") as f:
                         content = f.read()
@@ -883,34 +1093,16 @@ Please analyze what has been done and plan the next steps accordingly. If previo
                         end_idx = content.rfind(end_marker)
                         if start_idx != -1 and end_idx != -1:
                             summary_response = content[start_idx + len(start_marker):end_idx].strip()
-                            print(f"  - Extracted summary from file")
+                            print(f"  ✅ Extracted summary from file")
+                        else:
+                            summary_response = content.strip()
                 except Exception as e:
-                    print(f"  ⚠️ Error reading summarizer file: {e}")
-            
-            # Fallback: Generate summary if still not found
-            if not summary_response:
-                print(f"  - Generating new summary (no existing output found)")
-                
-                # Trigger summarizer agent
-                summary_prompt = (
-                    f"Summarize the progress of outer iteration {self.current_outer_turn}:\n"
-                    f"- Total inner iterations: {self.current_inner_turn}\n"
-                    f"- Codes created: {len(self.code_lineage)}\n"
-                    f"- Reports created: {len(self.draft_lineage)}\n"
-                    f"- Latest code status: {'SUCCESS' if summary_data['last_code_success'] else 'FAILED' if summary_data['last_code_success'] is not None else 'N/A'}\n"
-                    f"- Completion status: {inner_results.get('completed', False)}\n"
-                    "Provide a structured summary of key findings, improvements made, and remaining tasks."
-                )
-                
-                # Get summary from summarizer agent
-                summary_response = self.agents["summarizer"].generate_reply(
-                    messages=[{"content": summary_prompt, "role": "user"}]
-                )
+                    print(f"  ❌ Error reading summarizer file: {e}")
         
         # Build complete summary object with all data
         summary = {
-            "iteration": self.current_outer_turn,  # CRITICAL: This must match what we use in artifact_manager
-            "outer_iteration": self.current_outer_turn,  # Add redundant field for compatibility
+            "iteration": self.current_outer_turn,
+            "outer_iteration": self.current_outer_turn,
             "inner_turns": self.current_inner_turn,
             "artifacts": inner_results,
             "summary_text": summary_response,
@@ -920,25 +1112,29 @@ Please analyze what has been done and plan the next steps accordingly. If previo
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S")
         }
         
-        # CRITICAL: Always save to artifact, don't rely on it happening elsewhere
+        # Save JSON artifact
         print(f"  💾 Saving JSON artifact for iteration {self.current_outer_turn}")
         artifact_file = self.artifact_manager.save_iteration_summary_to_artifact(summary)
-        print(f"  ✅ JSON artifact file saved: {artifact_file}")
+        print(f"  ✅ JSON artifact saved: {artifact_file}")
         
-        # Verify the file was actually created
+        # Verify files were created
         if os.path.exists(artifact_file):
-            print(f"  ✅ Verified: JSON artifact file exists on disk")
-            # Check file size
             file_size = os.path.getsize(artifact_file)
-            print(f"  ✅ JSON artifact file size: {file_size} bytes")
-            
-            # Double-check by listing artifact directory
-            if os.path.exists(self.config.artifact_dir):
-                json_files = [f for f in os.listdir(self.config.artifact_dir) 
-                             if f.startswith(f"summary_outer{self.current_outer_turn}_") and f.endswith(".json")]
-                print(f"  ✅ Found {len(json_files)} JSON file(s) for iteration {self.current_outer_turn}")
+            print(f"  ✅ JSON file verified ({file_size} bytes)")
+        
+        # Check for .txt file
+        txt_file = None
+        if os.path.exists(self.config.artifact_dir):
+            for filename in os.listdir(self.config.artifact_dir):
+                if filename.startswith(f"summarizer_output_{self.current_outer_turn}_") and filename.endswith(".txt"):
+                    txt_file = os.path.join(self.config.artifact_dir, filename)
+                    break
+        
+        if txt_file and os.path.exists(txt_file):
+            txt_size = os.path.getsize(txt_file)
+            print(f"  ✅ TXT file verified ({txt_size} bytes)")
         else:
-            print(f"  ❌ ERROR: JSON artifact file was not created at {artifact_file}!")
+            print(f"  ⚠️ TXT file not found for iteration {self.current_outer_turn}")
         
         # Clear the last summarizer output for next iteration
         self.last_summarizer_output = None

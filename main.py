@@ -157,7 +157,7 @@ Examples:
     )
     parser.add_argument("--task", type=str, help="Custom task to execute")
     parser.add_argument("--max-inner-turn", type=int, default=100, help="Maximum inner iterations (default: 100)")
-    parser.add_argument("--max-outer-turn", type=int, default=3, help="Maximum outer iterations (default: 3)")
+    parser.add_argument("--max-outer-turn", type=int, default=5, help="Maximum outer iterations (default: 3)")
     parser.add_argument("--interactive", action="store_true", help="Enable interactive mode for task selection")
     parser.add_argument("--clear-artifacts", action="store_true", help="Clear artifact folder at start (default: preserve)")
     parser.add_argument("--preserve-all", action="store_true", help="Preserve all folders including coding and draft (for debugging)")
