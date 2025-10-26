@@ -454,10 +454,6 @@ git pull
 pip install -r requirements.txt --upgrade
 ```
 
-## 📜 License
-
-[Your License Here]
-
 ## 🙏 Credits
 
 Built with:
