@@ -514,12 +514,27 @@ class CustomGroupChatManager:
             for f in sorted(all_files):
                 print(f"      - {f}")
             
-            # Look for summary files to determine the highest iteration number
-            summary_files = []
+            # Look for ANY artifact files that indicate an iteration was completed
+            # This includes summarizer_output files, summary_outer files, etc.
+            
+            # Check summarizer output files FIRST (most reliable indicator)
+            for filename in all_files:
+                if filename.startswith("summarizer_output_") and filename.endswith(".txt"):
+                    # Format: summarizer_output_{N}_{timestamp}.txt
+                    try:
+                        # Split by underscore and get the iteration number
+                        parts = filename.replace("summarizer_output_", "").replace(".txt", "").split("_")
+                        if parts and parts[0].isdigit():
+                            iteration_num = int(parts[0])
+                            print(f"    ✓ Found summarizer file: {filename} → Iteration {iteration_num}")
+                            max_iteration = max(max_iteration, iteration_num)
+                    except Exception as e:
+                        print(f"    ❌ Error parsing {filename}: {e}")
+                        continue
+            
+            # Also check for summary files (in case summarizer files are missing)
             for filename in all_files:
                 if filename.startswith("summary_outer") and filename.endswith(".json"):
-                    summary_files.append(filename)
-                    # Extract iteration number from filename
                     # Format: summary_outer{N}_{timestamp}.json
                     try:
                         parts = filename.replace("summary_outer", "").replace(".json", "").split("_")
@@ -531,29 +546,11 @@ class CustomGroupChatManager:
                         print(f"    ❌ Error parsing {filename}: {e}")
                         continue
             
-            print(f"  📊 Summary files found: {len(summary_files)}")
-            
-            # Also check summarizer output files
-            summarizer_files = []
-            for filename in all_files:
-                if filename.startswith("summarizer_output_") and filename.endswith(".txt"):
-                    summarizer_files.append(filename)
-                    # Format: summarizer_output_{N}_{timestamp}.txt
-                    try:
-                        parts = filename.replace("summarizer_output_", "").replace(".txt", "").split("_")
-                        if parts and parts[0].isdigit():
-                            iteration_num = int(parts[0])
-                            print(f"    ✓ Found summarizer file: {filename} → Iteration {iteration_num}")
-                            max_iteration = max(max_iteration, iteration_num)
-                    except Exception as e:
-                        print(f"    ❌ Error parsing {filename}: {e}")
-                        continue
-            
-            print(f"  📊 Summarizer files found: {len(summarizer_files)}")
+            print(f"  📊 Maximum iteration found in artifacts: {max_iteration}")
         else:
             print(f"  ⚠️ Artifact directory does not exist: {self.config.artifact_dir}")
         
-        print(f"  🎯 Maximum iteration found: {max_iteration}")
+        print(f"  🎯 Highest completed iteration: {max_iteration}")
         print(f"  ➡️ Next iteration should be: {max_iteration + 1}")
         print(f"  📌 Returning: {max_iteration}")
         
@@ -572,10 +569,16 @@ class CustomGroupChatManager:
         print(f"  Max outer turns: {self.max_outer_turn}")
         print(f"  Max inner turns: {self.max_inner_turn}")
         
-        # Check for existing artifacts BEFORE starting any iterations
+        # CRITICAL: Check for existing artifacts EVERY time, not just when current_outer_turn == 0
+        # This ensures we always continue from the right iteration
+        print("\n📦 Checking for existing artifacts...")
         artifact_summary = ""
-        if self.current_outer_turn == 0:  # Only on first run
-            print("\n📦 Checking for existing artifacts...")
+        
+        # Always count existing iterations to determine where to start
+        existing_iterations = self._count_existing_outer_iterations()
+        
+        # Only load and display artifact summary if we're starting fresh
+        if self.current_outer_turn == 0 and existing_iterations > 0:
             artifact_summary = self.iteration_manager.load_and_summarize_all_artifacts()
             if artifact_summary:
                 print("\n" + "=" * 80)
@@ -583,19 +586,21 @@ class CustomGroupChatManager:
                 print("=" * 80)
                 print(artifact_summary)
                 print("=" * 80)
-                
-                # IMPORTANT: Count existing outer iterations to continue from the right number
-                existing_iterations = self._count_existing_outer_iterations()
-                if existing_iterations > 0:
-                    # Set to existing iterations so the NEXT increment goes to existing+1
-                    self.current_outer_turn = existing_iterations
-                    print(f"\n🔄 ADJUSTED current_outer_turn to: {self.current_outer_turn}")
-                    print(f"📊 Will start next iteration at: {self.current_outer_turn + 1}")
-                    
-                    # DON'T pre-update the artifact manager here - let the loop handle it
-                    print(f"🔧 Artifact manager will be updated when loop starts")
-        else:
-            print(f"  ⏭️ Skipping artifact check (current_outer_turn={self.current_outer_turn})")
+        
+        # CRITICAL FIX: Always set current_outer_turn based on existing iterations
+        # if we haven't already progressed past them
+        if existing_iterations > self.current_outer_turn:
+            self.current_outer_turn = existing_iterations
+            print(f"\n🔄 ADJUSTED current_outer_turn from 0 to: {self.current_outer_turn}")
+            print(f"📊 Will start next iteration at: {self.current_outer_turn + 1}")
+            
+            # Also update the artifact manager to be ready for the next iteration
+            # Note: We don't set it to existing_iterations + 1 here because the loop will increment it
+            print(f"🔧 Artifact manager will be synced when loop starts")
+        elif existing_iterations == self.current_outer_turn and self.current_outer_turn > 0:
+            print(f"  ✅ Already at the correct iteration: {self.current_outer_turn}")
+        elif self.current_outer_turn > existing_iterations:
+            print(f"  ⚠️ Current outer_turn ({self.current_outer_turn}) is ahead of artifacts ({existing_iterations})")
         
         # Add quit check before main loop
         print("\n💡 TIP: Type 'quit_debug' when prompted to exit with debug info")
@@ -715,22 +720,26 @@ Please analyze what has been done and plan the next steps accordingly. If previo
             if not self.conversation_terminated and self._admin_exit_detected():
                 self.conversation_terminated = True
                 
-            # If conversation was terminated, break immediately
-            if self.conversation_terminated:
-                print("\n🛑 Ending conversation.")
-                # Process any messages that were generated before termination
-                self._process_messages_and_save_artifacts()
-                return {"report": "Conversation terminated by user.", "terminated": True}
-
-            # Only continue with processing if not terminated
             # Process the messages that were generated during the chat
             inner_results = self._process_messages_and_save_artifacts()
             
-            # Summarize iteration
+            # CRITICAL: Always summarize iteration even if terminating
             print(f"\n📝 About to summarize iteration {self.current_outer_turn}")
             summary = self.summarize_iteration(inner_results)
             
-            # Save to memory
+            # CRITICAL: Ensure JSON summary is saved even if conversation is terminating
+            if not os.path.exists(os.path.join(self.config.artifact_dir, f"summary_outer{self.current_outer_turn}_*.json")):
+                print(f"  ⚠️ JSON summary not found, forcing save...")
+                # Force save the JSON summary
+                artifact_file = self.artifact_manager.save_iteration_summary_to_artifact(summary)
+                print(f"  ✅ Forced save of JSON summary: {artifact_file}")
+            
+            # If conversation was terminated, break after saving artifacts
+            if self.conversation_terminated:
+                print("\n🛑 Ending conversation after saving artifacts.")
+                return {"report": "Conversation terminated by user.", "terminated": True}
+            
+            # Save to memory (no-op now)
             self.memory_manager.save_iteration_summary(
                 self.current_outer_turn, summary
             )
@@ -779,16 +788,44 @@ Please analyze what has been done and plan the next steps accordingly. If previo
         if os.path.exists(self.config.artifact_dir):
             files = os.listdir(self.config.artifact_dir)
             print(f"Files in artifact dir ({len(files)} total):")
+            
+            # Count specific artifact types
+            json_summaries = [f for f in files if f.startswith("summary_outer") and f.endswith(".json")]
+            summarizer_outputs = [f for f in files if f.startswith("summarizer_output") and f.endswith(".txt")]
+            
+            print(f"\n  📊 Artifact breakdown:")
+            print(f"    - JSON summaries: {len(json_summaries)}")
+            print(f"    - Summarizer outputs: {len(summarizer_outputs)}")
+            
+            # Extract iteration numbers from artifacts
+            iterations_found = set()
+            for f in files:
+                if f.startswith("summary_outer"):
+                    try:
+                        parts = f.replace("summary_outer", "").replace(".json", "").split("_")
+                        if parts and parts[0].isdigit():
+                            iterations_found.add(int(parts[0]))
+                    except:
+                        pass
+                elif f.startswith("summarizer_output_"):
+                    try:
+                        parts = f.replace("summarizer_output_", "").replace(".txt", "").split("_")
+                        if parts and parts[0].isdigit():
+                            iterations_found.add(int(parts[0]))
+                    except:
+                        pass
+            
+            if iterations_found:
+                print(f"    - Iterations with artifacts: {sorted(iterations_found)}")
+                print(f"    - Highest iteration completed: {max(iterations_found)}")
+            
+            print(f"\n  📄 All files:")
             for f in sorted(files)[:10]:  # Show first 10
-                print(f"  - {f}")
+                print(f"    - {f}")
             if len(files) > 10:
-                print(f"  ... and {len(files) - 10} more files")
+                print(f"    ... and {len(files) - 10} more files")
         else:
             print("  (directory does not exist)")
-        
-        print(f"\nMemory manager history: {len(self.memory_manager.get_iteration_history())} entries")
-        for entry in self.memory_manager.get_iteration_history()[-3:]:  # Last 3
-            print(f"  - Iteration {entry.get('iteration')}: {entry.get('timestamp', 'N/A')[:19]}")
         
         print("="*60)
     
@@ -807,7 +844,7 @@ Please analyze what has been done and plan the next steps accordingly. If previo
         
         # Prepare summary data
         summary_data = {
-            "outer_iteration": stats["outer_iteration"],
+            "outer_iteration": self.current_outer_turn,
             "total_inner_iterations": stats["inner_iteration"],
             "codes_created": stats["codes_created"],
             "drafts_created": stats["drafts_created"],
@@ -819,32 +856,61 @@ Please analyze what has been done and plan the next steps accordingly. If previo
         print(f"  - Drafts created: {summary_data['drafts_created']}")
         
         # Check if we already have a summarizer output from the conversation
+        summary_response = ""
         if hasattr(self, 'last_summarizer_output') and self.last_summarizer_output:
             print(f"  - Using captured Summarizer output")
             summary_response = self.last_summarizer_output
         else:
-            # Fallback: Generate summary if not captured during conversation
-            print(f"  - Generating new summary (no captured output found)")
+            print(f"  - No captured summarizer output, checking artifact files...")
             
-            # Trigger summarizer agent
-            summary_prompt = (
-                f"Summarize the progress of outer iteration {self.current_outer_turn}:\n"
-                f"- Total inner iterations: {self.current_inner_turn}\n"
-                f"- Codes created: {len(self.code_lineage)}\n"
-                f"- Reports created: {len(self.draft_lineage)}\n"
-                f"- Latest code status: {'SUCCESS' if summary_data['last_code_success'] else 'FAILED' if summary_data['last_code_success'] is not None else 'N/A'}\n"
-                f"- Completion status: {inner_results.get('completed', False)}\n"
-                "Provide a structured summary of key findings, improvements made, and remaining tasks."
-            )
+            # Try to load from the saved summarizer_output file for this iteration
+            summarizer_file = None
+            if os.path.exists(self.config.artifact_dir):
+                for filename in sorted(os.listdir(self.config.artifact_dir), reverse=True):
+                    if filename.startswith(f"summarizer_output_{self.current_outer_turn}_") and filename.endswith(".txt"):
+                        summarizer_file = os.path.join(self.config.artifact_dir, filename)
+                        break
             
-            # Get summary from summarizer agent
-            summary_response = self.agents["summarizer"].generate_reply(
-                messages=[{"content": summary_prompt, "role": "user"}]
-            )
+            if summarizer_file and os.path.exists(summarizer_file):
+                print(f"  - Found summarizer file: {os.path.basename(summarizer_file)}")
+                try:
+                    with open(summarizer_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+                        # Extract the content between the markers
+                        start_marker = "=" * 50 + "\n\n"
+                        end_marker = "\n\n" + "=" * 50
+                        start_idx = content.find(start_marker)
+                        end_idx = content.rfind(end_marker)
+                        if start_idx != -1 and end_idx != -1:
+                            summary_response = content[start_idx + len(start_marker):end_idx].strip()
+                            print(f"  - Extracted summary from file")
+                except Exception as e:
+                    print(f"  ⚠️ Error reading summarizer file: {e}")
+            
+            # Fallback: Generate summary if still not found
+            if not summary_response:
+                print(f"  - Generating new summary (no existing output found)")
+                
+                # Trigger summarizer agent
+                summary_prompt = (
+                    f"Summarize the progress of outer iteration {self.current_outer_turn}:\n"
+                    f"- Total inner iterations: {self.current_inner_turn}\n"
+                    f"- Codes created: {len(self.code_lineage)}\n"
+                    f"- Reports created: {len(self.draft_lineage)}\n"
+                    f"- Latest code status: {'SUCCESS' if summary_data['last_code_success'] else 'FAILED' if summary_data['last_code_success'] is not None else 'N/A'}\n"
+                    f"- Completion status: {inner_results.get('completed', False)}\n"
+                    "Provide a structured summary of key findings, improvements made, and remaining tasks."
+                )
+                
+                # Get summary from summarizer agent
+                summary_response = self.agents["summarizer"].generate_reply(
+                    messages=[{"content": summary_prompt, "role": "user"}]
+                )
         
         # Build complete summary object with all data
         summary = {
-            "iteration": self.current_outer_turn,
+            "iteration": self.current_outer_turn,  # CRITICAL: This must match what we use in artifact_manager
+            "outer_iteration": self.current_outer_turn,  # Add redundant field for compatibility
             "inner_turns": self.current_inner_turn,
             "artifacts": inner_results,
             "summary_text": summary_response,
@@ -854,22 +920,25 @@ Please analyze what has been done and plan the next steps accordingly. If previo
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S")
         }
         
-        # Save to artifact
-        print(f"  💾 About to save artifact for iteration {self.current_outer_turn}")
+        # CRITICAL: Always save to artifact, don't rely on it happening elsewhere
+        print(f"  💾 Saving JSON artifact for iteration {self.current_outer_turn}")
         artifact_file = self.artifact_manager.save_iteration_summary_to_artifact(summary)
-        print(f"  ✅ Artifact file path: {artifact_file}")
+        print(f"  ✅ JSON artifact file saved: {artifact_file}")
         
         # Verify the file was actually created
         if os.path.exists(artifact_file):
-            print(f"  ✅ Verified: Artifact file exists on disk")
+            print(f"  ✅ Verified: JSON artifact file exists on disk")
             # Check file size
             file_size = os.path.getsize(artifact_file)
-            print(f"  ✅ Artifact file size: {file_size} bytes")
+            print(f"  ✅ JSON artifact file size: {file_size} bytes")
+            
+            # Double-check by listing artifact directory
+            if os.path.exists(self.config.artifact_dir):
+                json_files = [f for f in os.listdir(self.config.artifact_dir) 
+                             if f.startswith(f"summary_outer{self.current_outer_turn}_") and f.endswith(".json")]
+                print(f"  ✅ Found {len(json_files)} JSON file(s) for iteration {self.current_outer_turn}")
         else:
-            print(f"  ❌ ERROR: Artifact file was not created!")
-        
-        # Also save to memory manager
-        self.memory_manager.save_iteration_summary(self.current_outer_turn, summary)
+            print(f"  ❌ ERROR: JSON artifact file was not created at {artifact_file}!")
         
         # Clear the last summarizer output for next iteration
         self.last_summarizer_output = None

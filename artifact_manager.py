@@ -275,20 +275,21 @@ Original draft below:
         print(f"     self.current_outer_turn = {self.current_outer_turn}")
         print(f"     summary.get('iteration') = {summary.get('iteration', 'NOT SET')}")
         
-        # USE the iteration from the summary if it's different (it should be authoritative)
-        actual_iteration = summary.get("outer_iteration", self.current_outer_turn)
-        if actual_iteration != self.current_outer_turn:
-            print(f"  ⚠️ WARNING: Summary iteration ({actual_iteration}) differs from current ({self.current_outer_turn})")
-            print(f"     Using summary iteration: {actual_iteration}")
+        # FIX: Use the iteration from summary, as it's the authoritative source
+        actual_iteration = summary.get("iteration", self.current_outer_turn)
+        print(f"     Using iteration for filename: {actual_iteration}")
         
         filename = f"summary_outer{actual_iteration}_{timestamp}.json"
         filepath = os.path.join(self.config.artifact_dir, filename)
         
         print(f"  💾 Saving artifact: {filename}")
+        print(f"  📂 Full path: {filepath}")
         
         # Prepare the complete summary with all lineage information
+        # FIX: Use actual_iteration consistently
         complete_summary = {
-            "outer_iteration": self.current_outer_turn,
+            "outer_iteration": actual_iteration,  # Changed from self.current_outer_turn
+            "iteration": actual_iteration,  # Add this for consistency
             "total_inner_iterations": self.current_inner_turn,
             "timestamp": timestamp,
             "summary_text": summary.get("summary_text", ""),
@@ -299,11 +300,26 @@ Original draft below:
             "task_history": summary.get("task_history", [])
         }
         
-        # Write to file with error handling
+        # Write to file with error handling and force flush
         try:
+            # Write JSON with explicit encoding and flush
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(complete_summary, f, indent=2, ensure_ascii=False)
+                f.flush()  # Force flush to disk
+                os.fsync(f.fileno())  # Force OS to write to disk
+            
             print(f"  ✅ Successfully saved iteration summary to {filename}")
+            
+            # Double verify it exists and is readable
+            if not os.path.exists(filepath):
+                print(f"  ❌ ERROR: File doesn't exist after writing: {filepath}")
+                # Try alternative write method
+                import tempfile
+                temp_path = filepath + ".tmp"
+                with open(temp_path, "w", encoding="utf-8") as f:
+                    json.dump(complete_summary, f, indent=2, ensure_ascii=False)
+                os.replace(temp_path, filepath)
+                print(f"  🔄 Retried with atomic write")
             
             # Verify it's readable
             with open(filepath, "r", encoding="utf-8") as f:
@@ -314,15 +330,20 @@ Original draft below:
             print(f"  ❌ ERROR saving artifact: {e}")
             import traceback
             traceback.print_exc()
-            return filepath
-        
-        # Register with memory manager
-        if self.memory_manager:
+            # Try to save a minimal version as fallback
             try:
-                self.memory_manager.save_artifact_reference(self.current_outer_turn, filepath)
-                print(f"  📝 Registered artifact with memory manager for iteration {self.current_outer_turn}")
-            except Exception as e:
-                print(f"  ⚠️ Warning: Could not register with memory manager: {e}")
+                minimal_summary = {
+                    "iteration": actual_iteration,
+                    "timestamp": timestamp,
+                    "error": str(e)
+                }
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(minimal_summary, f)
+                print(f"  ⚠️ Saved minimal summary due to error")
+            except:
+                pass
+        
+        print(f"  ✅ Iteration summary artifact process completed")
         
         return filepath
     
