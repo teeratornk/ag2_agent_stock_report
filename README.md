@@ -2,6 +2,64 @@
 
 A smart application that automatically generates professional blog posts about stock performance using AI agents that work together like a team.
 
+## 🌟 Example Output - See What This System Creates!
+
+The system generates comprehensive, professional-grade stock analysis reports. Here's a real example:
+
+### Sample Generated Report: `output/report_20251026_152151.md`
+
+This report was produced after 4 iterations of AI agent collaboration:
+
+```markdown
+---
+title: "Nvidia Stock in October 2025: Performance, Peers & Risk-Return Reality Check"
+description: "A data-driven review of Nvidia's stock performance from 23 Sep – 23 Oct 2025"
+date: 2025-10-23
+author: "Market Insights Lab"
+---
+
+# Nvidia's October 2025 Stock Performance in Context
+
+The semiconductor sector has been one of 2025's most closely watched arenas...
+
+## Market Performance at a Glance
+
+| Ticker | 23 Sep '25 Close | 23 Oct '25 Close | Return (%) | Volatility (%) |
+|:------:|------------------|------------------|------------|----------------|
+| NVDA   | $178.43         | $180.28          | +1.04%     | 31.1%         |
+| AMD    | $160.90         | $230.23          | +43.09%    | 102.4%        |
+| INTC   | $29.34          | $36.92           | +25.84%    | 58.7%         |
+
+[Full professional analysis continues...]
+```
+
+#### What Each Report Includes:
+
+📈 **Performance Analytics**
+- Indexed performance comparisons with peers
+- Volatility and risk metrics
+- Market benchmarking (vs S&P 500, sector ETFs)
+
+📊 **Professional Visualizations** 
+- Price trend charts
+- Peer comparison graphs  
+- Risk-return scatter plots
+
+💡 **Market Insights**
+- AI chip demand analysis
+- Competitive landscape assessment
+- Investment implications
+
+✨ **Production Quality**
+- SEO-optimized metadata
+- Professional formatting
+- Data tables with precise metrics
+- Publication-ready markdown
+
+> 📁 View the complete example: [`output/report_20251026_152151.md`](output/report_20251026_152151.md)
+
+---
+
 ## 🎯 What Does This Do?
 
 This application creates detailed, well-researched blog posts about stock market performance. It's like having a team of experts working together:
@@ -25,7 +83,7 @@ This application creates detailed, well-researched blog posts about stock market
 
 ```bash
 # Clone this repository (or download as ZIP)
-git clone [your-repository-url]
+git clone https://github.com/teeratornk/ag2_agent_stock_report.git
 cd report_stock_rev2
 ```
 
@@ -85,17 +143,79 @@ When you run `python main.py`, you'll see:
    - Or enter your own custom task
    - Example: "Write a blog about Apple stock performance in Q3 2024"
 
-3. **During Execution:**
-   - The AI agents will work together automatically
-   - You'll be prompted occasionally to:
-     - Press Enter to continue (let agents work)
-     - Provide feedback if needed
-     - Type 'terminate' to stop early
-     - Type 'approved' when satisfied
+3. **First Iteration (Automatic):**
+   - The AI agents work together automatically
+   - Admin receives the initial task requirements
+   - Agents collaborate to fetch data, create charts, and write report
+   - You'll see their conversation and progress
 
-4. **Final Output:**
+4. **During Each Iteration:**
+   When prompted by Admin, you have several options:
+   - **Press Enter** - Let agents continue working
+   - **Provide feedback** - Give specific instructions for improvements
+   - **Type 'approved'** - Accept current results and finish
+   - **Type 'terminate'** - Stop the process immediately
+   - **Type 'quit_debug'** - Exit with detailed debug information
+
+5. **After Each Iteration Completes:**
+   - Review the summary of what was accomplished
+   - For iterations 2+, you'll be prompted for specific improvements:
+     - Specify what to improve or fix
+     - Request new features or analysis
+     - Type 'continue' to let agents decide
+     - Type 'approve' to accept and exit
+   - Choose whether to continue to the next iteration
+
+6. **Final Output:**
    - Find your completed blog post in the `output` folder
    - File will be named like: `report_20241201_143022.md`
+
+### 🔄 Understanding the Iteration System
+
+The application uses a **dual-iteration system** for quality improvement:
+
+#### **Outer Iterations** (Major Revisions)
+- Complete cycles where the entire task is revisited
+- Default: 3 outer iterations maximum
+- Each outer iteration can refine and improve the entire work
+- After iteration 1, you provide specific feedback for improvements
+
+#### **Inner Iterations** (Agent Conversations)
+- Individual steps within each outer iteration
+- Agents talking to each other (Plan → Code → Execute → Write → Review)
+- Default: 100 maximum per outer iteration
+- Automatically managed by the system
+
+#### **How Iterations Work:**
+
+**Iteration 1 (Automatic):**
+- Agents receive your initial task
+- They work together to create the first version
+- Summarizer creates a summary at the end
+
+**Iterations 2+ (Interactive):**
+- System shows you what was accomplished in previous iteration
+- You're prompted to provide specific feedback:
+  ```
+  ================================================================
+  📝 ITERATION 2 USER INPUT REQUIRED
+  ================================================================
+  
+  📊 Context from previous iterations:
+  [Previous work summary shown here]
+  
+  Please provide your feedback and instructions for this iteration.
+  You can:
+    1. Specify what to improve or fix
+    2. Request new features or analysis
+    3. Ask to focus on specific aspects
+    4. Type 'continue' to let agents decide improvements
+    5. Type 'approve' to accept current results and exit
+  
+  👤 Your instructions for iteration 2: 
+  ```
+- Your feedback guides the agents' work in this iteration
+- Process repeats until you approve or reach max iterations
 
 ### Advanced Usage (Command Line)
 
@@ -113,23 +233,124 @@ python main.py --max-inner-turn 5 --max-outer-turn 1
 python main.py --help
 ```
 
+## 🎮 Interactive Features
+
+### User Control Points
+
+1. **Admin Prompts During Execution:**
+   ```
+   [Admin Input Required]
+   Options:
+     - Provide feedback or instructions for the team
+     - Type 'approved' when satisfied with the results
+     - Type 'terminate' to end the conversation
+     - Type 'quit_debug' to exit with debug information
+     - Press Enter to let agents continue
+   
+   Your input:
+   ```
+
+2. **Between Iterations:**
+   ```
+   Iteration 1 completed.
+   Would you like to continue to iteration 2?
+     - Type 'yes' or press Enter to continue
+     - Type 'no' or 'exit' to stop
+   
+   👤 Continue to next iteration? [yes]/no:
+   ```
+
+3. **Iteration Feedback (Iteration 2+):**
+   - Review previous work summary
+   - Provide specific improvement instructions
+   - Or let agents decide
+
+### Understanding Agent Responses
+
+- **Admin elaborates** - Breaks down your requirements for the team
+- **Planner analyzes** - Determines what data and content is needed
+- **Engineer writes code** - Creates Python scripts for data fetching
+- **Executor runs** - Executes code and reports results
+- **Writer creates** - Produces the blog post content
+- **Planner reviews** - Checks quality and completeness
+- **Summarizer concludes** - Creates iteration summary
+
+## 🛡️ Artifact System
+
+### What Are Artifacts?
+
+Artifacts are saved progress from your work sessions:
+- **Code files** - Python scripts created by Engineer
+- **Data files** - Stock data fetched from APIs
+- **Charts** - Visualizations created by the code
+- **Draft reports** - Blog post iterations
+- **Summaries** - Progress tracking for each iteration
+
+### Artifact Management
+
+**When starting the application:**
+```
+Artifact Management:
+  Artifacts contain memory from previous sessions.
+  1. Preserve artifacts (continue from previous sessions)
+  2. Clear artifacts (start fresh)
+
+Select option (1-2) [default: 1]:
+```
+
+**Benefits of preserving artifacts:**
+- Continue from where you left off
+- Build upon previous work
+- Agents can see what was already done
+- Avoid repeating successful work
+
+**When to clear artifacts:**
+- Starting a completely new task
+- Previous work had errors
+- Want a fresh perspective
+- Testing different approaches
+
+### Artifact Directory Structure
+
+```
+artifact/
+├── summary_outer1_20241201_143022.json    # Iteration 1 summary
+├── summary_outer2_20241201_144532.json    # Iteration 2 summary
+├── summarizer_output_1_20241201_143020.txt # Detailed iteration output
+└── summarizer_output_2_20241201_144530.txt # Detailed iteration output
+
+coding/
+├── data/
+│   └── nvda_data.csv                      # Fetched stock data
+├── figures/
+│   └── nvda_price.png                     # Generated charts
+└── code_v1_1_20241201_142015.py          # Python scripts
+
+draft/
+└── report_v1_1_20241201_143015.md        # Blog post drafts
+
+output/
+└── report_20241201_145000.md             # Final blog posts
+```
+
 ## 🤖 The AI Agents Team (agents.py)
 
 The application uses a team of specialized AI agents that collaborate to create your reports. Here's how each agent works:
 
-### 🎩 Admin (User Proxy)
+### 🎩 Admin (User Proxy) - Enhanced
 **Role**: You, the human supervisor  
 **Responsibilities**:
-- Provides the initial task to the team
-- Reviews work at each stage
-- Gives feedback for improvements
-- Approves final results
+- **Understands requirements** - Analyzes what you're asking for
+- **Elaborates for team** - Breaks down tasks into specific actions
+- **Quality control** - Reviews outputs against requirements
+- **Iterative refinement** - Provides specific, actionable feedback
+- **Completion approval** - Types 'APPROVED' when satisfied
 
-**How to interact**:
-- Press **Enter** to let agents continue working
-- Type **feedback** to guide the team
-- Type **'approved'** when satisfied
-- Type **'terminate'** to stop the process
+**Enhanced interaction features:**
+- Clear prompt messages with options
+- Debug quit capability (`quit_debug`)
+- Better feedback mechanisms
+- Iteration-specific guidance
 
 ### 📋 Planner
 **Role**: Project manager and quality controller  
@@ -373,7 +594,7 @@ Edit the Planner's system message for different focus:
 |----------|-------------|---------|---------|
 | `--task` | Specify task directly | Interactive prompt | `--task "Analyze AAPL stock"` |
 | `--max-inner-turn` | Limit agent interactions per outer iteration | 100 | `--max-inner-turn 10` |
-| `--max-outer-turn` | Limit major revision cycles | 3 | `--max-outer-turn 2` |
+| `--max-outer-turn` | Limit major revision cycles | 5 | `--max-outer-turn 2` |
 | `--clear-artifacts` | Start fresh, remove all previous work | False | `--clear-artifacts` |
 | `--preserve-all` | Debug mode - don't clear any folders | False | `--preserve-all` |
 | `--interactive` | Force interactive mode | Auto-detect | `--interactive` |
@@ -415,19 +636,18 @@ AZURE_OPENAI_CODE_EXE=gpt-3.5-turbo   # Executor (simpler tasks)
 ## 🎯 Tips for Best Results
 
 1. **Be Specific:** The more detailed your task, the better the output
-2. **Let It Run:** Don't terminate early - agents improve with iterations
-3. **Provide Feedback:** When prompted, guide the agents toward what you want
-4. **Save Artifacts:** Keep artifacts to build upon previous work
-5. **Check Charts:** Review the `coding/figures/` folder for generated charts
-6. **Understanding Agent Feedback**: 
-   - If Planner requests changes, it's improving quality
-   - Multiple iterations are normal and beneficial
-   - Each agent specializes in their domain
-
-7. **Debugging Issues**:
-   - Check `coding/` folder for generated Python files
-   - Review `draft/` folder for report iterations
-   - Look for error messages from Executor
+2. **Use Iterations Wisely:** 
+   - Iteration 1: Let agents explore the task
+   - Iteration 2: Refine based on what you see
+   - Iteration 3: Polish and finalize
+3. **Provide Clear Feedback:** When prompted between iterations, be specific about improvements
+4. **Let Agents Work:** Press Enter during execution to let them continue
+5. **Save Artifacts:** Keep artifacts to build upon previous work
+6. **Check Progress:** Review charts in `coding/figures/` and drafts in `draft/`
+7. **Understanding Feedback Loop:**
+   - Each iteration builds on the previous
+   - Your feedback shapes the improvements
+   - Agents remember context between iterations
 
 ## 📈 Understanding the Output
 
