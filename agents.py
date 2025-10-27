@@ -45,10 +45,35 @@ def create_agents(config, llm_config: Dict[str, Any], exit_terms: set = None) ->
     agents["user_proxy"] = CustomAdminAgent(
         name="Admin",
         system_message=(
-            "You are the Admin. Give the task, and send instructions to writer to refine the blog post. "
-            "Review reports and provide feedback for improvements. "
-            "When satisfied with the report, respond with 'APPROVED' to finalize. "
-            "You can type 'terminate' at any time to terminate the conversation."
+            "You are the Admin, the bridge between the user and the technical team.\n"
+            "Your key responsibilities:\n\n"
+            "1. UNDERSTAND USER REQUIREMENTS:\n"
+            "   - Carefully analyze what the user is asking for\n"
+            "   - Identify key objectives, metrics, and deliverables\n"
+            "   - Clarify any ambiguous requirements\n"
+            "   - Consider both explicit and implicit needs\n\n"
+            "2. ELABORATE AND COMMUNICATE TO PLANNER:\n"
+            "   - Break down the user's request into specific, actionable tasks\n"
+            "   - Specify what data needs to be collected (time periods, metrics, sources)\n"
+            "   - Define what analysis should be performed (comparisons, trends, calculations)\n"
+            "   - Describe desired visualizations (chart types, key information to highlight)\n"
+            "   - Outline report structure and key points to cover\n"
+            "   - Provide context about the target audience and purpose\n\n"
+            "3. QUALITY CONTROL:\n"
+            "   - Review outputs to ensure they meet user requirements\n"
+            "   - Check if all requested elements are addressed\n"
+            "   - Verify data accuracy and visualization clarity\n"
+            "   - Ensure the report is suitable for the intended audience\n\n"
+            "4. ITERATIVE REFINEMENT:\n"
+            "   - Provide specific, actionable feedback to improve outputs\n"
+            "   - Focus feedback on gaps between current output and user requirements\n"
+            "   - Guide the team toward the user's vision\n"
+            "   - Balance technical accuracy with user accessibility\n\n"
+            "5. COMPLETION:\n"
+            "   - When outputs fully satisfy user requirements, respond with 'APPROVED'\n"
+            "   - You can type 'terminate' at any time to end the conversation\n\n"
+            "Remember: You represent the user's interests. Ensure the team understands not just WHAT "
+            "to do, but WHY it matters and HOW it serves the user's goals."
         ),
         code_execution_config=False,
         llm_config=llm_config,
@@ -56,7 +81,7 @@ def create_agents(config, llm_config: Dict[str, Any], exit_terms: set = None) ->
         is_termination_msg=list(exit_terms),  # Convert set to list for autogen
         max_consecutive_auto_reply=0,  # Ensure human input is always required
         default_auto_reply="",  # No auto-reply
-        description="Admin who provides tasks, reviews outputs, and gives feedback. Type 'exit' to end."
+        description="Admin who understands user requirements, elaborates them for the team, reviews outputs, and ensures quality. Type 'exit' to end."
     )
     
     # Planner agent

@@ -14,6 +14,13 @@ class CustomGroupChatManagerWithTracking(autogen.GroupChatManager):
         self.planner_message_count = 0  # Track number of planner messages
         self.message_count = 0  # Track total messages for inner turn calculation
         self.admin_message_count = 0  # Track Admin messages to detect new outer iterations
+    
+    def reset_for_new_iteration(self):
+        """Reset tracking variables for a new outer iteration."""
+        self.planner_message_count = 0
+        self.message_count = 0
+        self.admin_message_count = 0
+        print(f"  🔄 Reset message tracking for new iteration")
         
     def _process_received_message(self, message, sender, silent=False):
         """Process messages and save artifacts in real-time."""
@@ -749,8 +756,21 @@ class CustomGroupChatManager:
             # Update artifact manager
             self.artifact_manager.set_iteration(self.current_outer_turn, self.current_inner_turn)
             
-            # Reset message tracking for new iteration
+            # CRITICAL: Reset ALL tracking for new iteration
             self.last_processed_message_index = 0
+            
+            # Reset hash sets for duplicate detection - each iteration starts fresh
+            self._saved_code_hashes.clear()
+            self._saved_draft_hashes.clear()
+            
+            # Reset the tracking in the custom group chat manager
+            if hasattr(self.manager, 'reset_for_new_iteration'):
+                self.manager.reset_for_new_iteration()
+            
+            # Also ensure artifact manager knows this is a new iteration
+            self.artifact_manager.reset_for_new_iteration()
+            
+            print(f"  ✅ Reset all tracking for iteration {self.current_outer_turn}")
             
             # CRITICAL: Load context from ALL previous iterations
             context_message = ""
@@ -888,6 +908,12 @@ This is iteration {self.current_outer_turn} of {self.max_outer_turn}."""
                 
                 # Create a fresh group chat for this iteration (with message history cleared)
                 self.groupchat.messages.clear()
+                
+                # Reset the manager's tracking as well
+                if hasattr(self.manager, 'planner_message_count'):
+                    self.manager.planner_message_count = 0
+                    self.manager.message_count = 0
+                    self.manager.admin_message_count = 0
                 
                 # Initiate chat for this iteration
                 result = self.agents["user_proxy"].initiate_chat(
